@@ -1,0 +1,151 @@
+		Kernel Mode RDMA Ping Module
+		   Steve Wise - 5/2007
+
+============
+Introduction
+============
+
+The krping module is a kernel loadable module that utilizes the Open
+Fabrics verbs to implement a client/server ping/pong program.  The module
+was implemented as a test vehicle for working with the iwarp branch of
+the OFA project.
+
+The goals of this program include:
+
+- Simple harness to test kernel-mode verbs: connection setup, send,
+recv, rdma read, rdma write, and completion notifications.
+
+- Client/server model.
+
+- IP addressing used to identify remote peer.
+
+- Transport independent utilizing the new RDMA CMA service
+
+- No user-space application needed.
+
+- Just a test utility.
+
+This module allows establishing connections and running ping/pong tests
+via a /proc entry called /proc/krping.  This simple mechanism allows
+starting many kernel threads concurrently and avoids the need for a user
+space application.
+
+The krping module is designed to utilize all the major DTO operations:
+send, recv, rdma read, and rdma write.  Its goal was to test the API
+and as such is not necessarily an efficient test.  Once the connection
+is established, the client and server begin a ping/pong loop:
+
+Client				Server
+---------------------------------------------------------------------
+SEND(ping source rkey/addr/len)
+
+				RECV Completion with ping source info
+				RDMA READ from client source MR
+				RDMA Read completion
+				SEND .go ahead. to client
+
+RECV Completion of .go ahead.
+SEND (ping sink rkey/addr/len)	
+
+				RECV Completion with ping sink info
+				RDMA Write to client sink MR
+				RDMA Write completion
+				SEND .go ahead. to client
+
+RECV Completion of .go ahead.
+Validate data
+
+<repeat the above loop>
+
+
+============
+To build/install the krping module
+============
+
+# git clone git://git.openfabrics.org/~swise/krping
+# cd krping
+# make && make install
+# modprobe rdma_krping
+
+============
+Using Krping
+============
+Communication from user space is done via the /proc filesystem.
+Krping exports file /proc/krping.  Writing commands in ascii format to
+/proc/krping will start krping threads in the kernel.  The thread issuing
+the write to /proc/krping is used to run the krping test, so it will
+block until the test completes, or until the user interrupts the write.
+
+Here is a simple example to start an rping test using the rdma_krping
+module.  The server's address is 192.168.69.127.  The client will
+connect to this address at port 9999 and issue 100 ping/pong messages.
+This example assumes you have two systems connected via IB and the
+IPoverIB devices are configured on the 192.168.69/24 subnet accordingly.
+
+Server:
+
+# modprobe rdma_krping
+# echo "server,test=rping,addr=192.168.69.127,port=9999" >/proc/krping
+
+
+The echo command above will block until the krping test completes,
+or the user hits ctrl-c.
+
+On the client:
+
+# modprobe rdma_krping
+# echo "client,test=rping,addr=192.168.69.127,port=9999,count=100" >/proc/krping
+
+Just like on the server, the echo command above will block until the
+krping test completes, or the user hits ctrl-c.
+
+The syntax for krping commands is a string of options separated by
+commas.  Options can be single keywords, or in the form: option=operand.
+
+Operands can be integers or strings.
+
+Opcode		Operand Type	Description
+------------------------------------------------------------------------
+client		none		Initiate a client side krping thread.
+server		none		Initiate a server side krping thread.
+addr		string		The destination IP address in dotted 
+				decimal format.
+port		integer		The destination port number in host byte 
+				order.
+count		integer		The number of rping iterations to 
+				perform before shutting down the test.  
+				If unspecified, the count is infinite.
+size		integer		The size of the rping data.  Default for 
+				rping is 65 bytes and 64KB for fast.
+verbose		none		Enables printk()s that dump the rping 
+				data.
+validate	none		Enables validating the rping data to 
+				detect data corruption.
+
+While krping threads are executing, you can obtain statistics on the
+thread by reading from the /proc/krping file.  If you cat /proc/krping,
+you will dump IO statistics for each running krping thread.  The format
+is one thread per line, and each thread contains the following stats
+separated by white spaces:
+
+Statistic		Description
+---------------------------------------------------------------------
+Name			krping thread number and device being used.
+Send Bytes		Number of bytes transferred in SEND WRs.
+Send Messages		Number of SEND WRs posted
+Recv Bytes		Number of bytes received via RECV completions.
+Recv Messages		Number of RECV WRs completed.
+RDMA WRITE Bytes	Number of bytes transferred in RDMA WRITE WRs.
+RDMA WRITE Messages	Number of RDMA WRITE WRs posted.
+RDMA READ Bytes		Number of bytes transferred via RDMA READ WRs.
+RDMA READ Messages	Number of RDMA READ WRs posted.
+
+Here is an example of the server side output for 5 krping threads:
+
+# cat /proc/krping
+1-amso0 0 0 16 1 12583960576 192016 0 0
+2-mthca0 0 0 16 1 60108570624 917184 0 0
+3-mthca0 0 0 16 1 59106131968 901888 0 0
+4-mthca1 0 0 16 1 101658394624 1551184 0 0
+5-mthca1 0 0 16 1 100201922560 1528960 0 0
+#
