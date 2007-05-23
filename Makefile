@@ -1,6 +1,7 @@
 KSRC=/lib/modules/`uname -r`/source
+KOBJ=/lib/modules/`uname -r`/build
 CFLAGS += -DLINUX -D__KERNEL__ -DMODULE -O2 -pipe -Wall
-CFLAGS += -I/usr/local/src/ofa_1_2_kernel-20070313-1000/include -I$(KSRC)/include -I.
+CFLAGS += -I/usr/local/ofed/src/ofa_kernel-1.2/include -I$(KSRC)/include -I.
 CFLAGS += $(shell [ -f $(KSRC)/include/linux/modversions.h ] && \
             echo "-DMODVERSIONS -DEXPORT_SYMTAB \
                   -include $(KSRC)/include/linux/modversions.h")
@@ -14,7 +15,9 @@ obj-m += rdma_krping.o
 rdma_krping-y			:= getopt.o krping.o
 
 default:
-	make -C $(KSRC) SUBDIRS=$(shell pwd) LINUXINCLUDE='-I/usr/local/src/ofa_1_2_kernel-20070310-1414/include -I$(KSRC)/include -I.  -include include/linux/autoconf.h ' modules
+	make -C $(KSRC) O=$(KOBJ) SUBDIRS=$(shell pwd) modules
+install:
+	make -C $(KSRC) O=$(KOBJ) SUBDIRS=$(shell pwd) modules_install
 
 clean:
 	rm -f *.o
