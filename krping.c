@@ -560,7 +560,7 @@ static int krping_setup_qp(struct krping_cb *cb, struct rdma_cm_id *cm_id)
 	DEBUG_LOG("created pd %p\n", cb->pd);
 
 	cb->cq = ib_create_cq(cm_id->device, krping_cq_event_handler, NULL,
-			      cb, RPING_SQ_DEPTH * 2);
+			      cb, RPING_SQ_DEPTH * 2, 0);
 	if (IS_ERR(cb->cq)) {
 		printk(KERN_ERR PFX "ib_create_cq failed\n");
 		ret = PTR_ERR(cb->cq);
