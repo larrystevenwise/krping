@@ -1,0 +1,10 @@
+9/26/2007
+
+The Makefile included seems to work on some platforms, but the only
+way I've seen to get a ofa-dependent module to build and generate the
+correct module versions is to build the module inside the ofa kernel tree.
+
+To that end I've created the install-ofa.sh script.  It will add the
+rdma_krping module to the chelsio driver build directory and alter its
+Makefile to build and install rdma_krping along with the iw_cxgb3 module.
+Just run install-ofa.sh to get things going.
