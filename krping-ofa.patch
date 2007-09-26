@@ -1,4 +1,4 @@
----a/drivers/infiniband/hw/cxgb3/Makefile	2007-09-12 05:28:57.000000000 -0500
+--- a/drivers/infiniband/hw/cxgb3/Makefile	2007-09-12 05:28:57.000000000 -0500
 +++ b/drivers/infiniband/hw/cxgb3/Makefile	2007-09-26 09:59:53.000000000 -0500
 @@ -2,10 +2,13 @@ EXTRA_CFLAGS += -I$(TOPDIR)/drivers/net/
  		-I$(TOPDIR)/drivers/infiniband/hw/cxgb3/core
