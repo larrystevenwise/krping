@@ -77,15 +77,18 @@ static const struct krping_option krping_opts[] = {
 };
 
 struct krping_stats {
-	u64 send_bytes;
-	u64 send_msgs;
-	u64 recv_bytes;
-	u64 recv_msgs;
-	u64 write_bytes;
-	u64 write_msgs;
-	u64 read_bytes;
-	u64 read_msgs;
+	unsigned long long send_bytes;
+	unsigned long long send_msgs;
+	unsigned long long recv_bytes;
+	unsigned long long recv_msgs;
+	unsigned long long write_bytes;
+	unsigned long long write_msgs;
+	unsigned long long read_bytes;
+	unsigned long long read_msgs;
 };
+
+#define htonll(x) cpu_to_be64((x))
+#define ntohll(x) cpu_to_be64((x))
 
 static DECLARE_MUTEX(krping_mutex);
 
@@ -277,11 +280,12 @@ static int server_recv(struct krping_cb *cb, struct ib_wc *wc)
 		return -1;
 	}
 
-	cb->remote_rkey = cb->recv_buf.rkey;
-	cb->remote_addr = cb->recv_buf.buf;
-	cb->remote_len  = cb->recv_buf.size;
+	cb->remote_rkey = ntohl(cb->recv_buf.rkey);
+	cb->remote_addr = ntohll(cb->recv_buf.buf);
+	cb->remote_len  = ntohl(cb->recv_buf.size);
 	DEBUG_LOG("Received rkey %x addr %llx len %d from peer\n",
-		  cb->remote_rkey, cb->remote_addr, cb->remote_len);
+		  cb->remote_rkey, (unsigned long long)cb->remote_addr, 
+		  cb->remote_len);
 
 	if (cb->state <= CONNECTED || cb->state == RDMA_WRITE_COMPLETE)
 		cb->state = RDMA_READ_ADV;
@@ -551,7 +555,6 @@ static void krping_free_qp(struct krping_cb *cb)
 static int krping_setup_qp(struct krping_cb *cb, struct rdma_cm_id *cm_id)
 {
 	int ret;
-
 	cb->pd = ib_alloc_pd(cm_id->device);
 	if (IS_ERR(cb->pd)) {
 		printk(KERN_ERR PFX "ib_alloc_pd failed\n");
@@ -593,12 +596,12 @@ static void krping_format_send(struct krping_cb *cb, u64 buf,
 {
 	struct krping_rdma_info *info = &cb->send_buf;
 
-	info->buf = buf;
-	info->rkey = mr->rkey;
-	info->size = cb->size;
+	info->buf = htonll(buf);
+	info->rkey = htonl(mr->rkey);
+	info->size = htonl(cb->size);
 
 	DEBUG_LOG("RDMA addr %llx rkey %x len %d\n",
-		  info->buf, info->rkey, info->size);
+		  (unsigned long long)buf, mr->rkey, cb->size);
 }
 
 static void krping_test_server(struct krping_cb *cb)
@@ -670,7 +673,7 @@ static void krping_test_server(struct krping_cb *cb)
 		cb->rdma_sq_wr.sg_list->length = strlen(cb->rdma_buf) + 1;
 		DEBUG_LOG("rdma write from lkey %x laddr %llx len %d\n",
 			  cb->rdma_sq_wr.sg_list->lkey,
-			  cb->rdma_sq_wr.sg_list->addr,
+			  (unsigned long long)cb->rdma_sq_wr.sg_list->addr,
 			  cb->rdma_sq_wr.sg_list->length);
 
 		ret = ib_post_send(cb->qp, &cb->rdma_sq_wr, &bad_wr);
