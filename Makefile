@@ -1,6 +1,6 @@
 KSRC=/lib/modules/`uname -r`/source
 KOBJ=/lib/modules/`uname -r`/build
-OFA=/usr/src/ofa_kernel-1.2.5
+OFA=/opt/ofa/ofa_1_3_kernel-20080116-1406
 CFLAGS += -DLINUX -D__KERNEL__ -DMODULE -O2 -pipe -Wall
 CFLAGS += -I$(OFA)/include -I$(KSRC)/include -I.
 CFLAGS += $(shell [ -f $(KSRC)/include/linux/modversions.h ] && \

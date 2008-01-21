@@ -73,6 +73,7 @@ static const struct krping_option krping_opts[] = {
 	{"validate", OPT_NOPARAM, 'V'},
 	{"server", OPT_NOPARAM, 's'},
 	{"client", OPT_NOPARAM, 'c'},
+	{"dmamr", OPT_NOPARAM, 'D'},
 	{NULL, 0, 0}
 };
 
@@ -159,30 +160,37 @@ struct krping_cb {
 	struct ib_pd *pd;
 	struct ib_qp *qp;
 	struct ib_mr *dma_mr;
+	int use_dmamr;
 
 	struct ib_recv_wr rq_wr;	/* recv work request record */
 	struct ib_sge recv_sgl;		/* recv single SGE */
 	struct krping_rdma_info recv_buf;/* malloc'd buffer */
+	u64 recv_dma_addr;
 	DECLARE_PCI_UNMAP_ADDR(recv_mapping)
+	struct ib_mr *recv_mr;
 
 	struct ib_send_wr sq_wr;	/* send work requrest record */
 	struct ib_sge send_sgl;
 	struct krping_rdma_info send_buf;/* single send buf */
+	u64 send_dma_addr;
 	DECLARE_PCI_UNMAP_ADDR(send_mapping)
+	struct ib_mr *send_mr;
 
 	struct ib_send_wr rdma_sq_wr;	/* rdma work request record */
 	struct ib_sge rdma_sgl;		/* rdma single SGE */
 	char *rdma_buf;			/* used as rdma sink */
-	u64  rdma_addr;
+	u64  rdma_dma_addr;
 	DECLARE_PCI_UNMAP_ADDR(rdma_mapping)
+	struct ib_mr *rdma_mr;
 
 	uint32_t remote_rkey;		/* remote guys RKEY */
 	uint64_t remote_addr;		/* remote guys TO */
 	uint32_t remote_len;		/* remote guys LEN */
 
 	char *start_buf;		/* rdma read src */
-	u64  start_addr;
+	u64  start_dma_addr;
 	DECLARE_PCI_UNMAP_ADDR(start_mapping)
+	struct ib_mr *start_mr;
 
 	enum test_state state;		/* used for cond/signalling */
 	wait_queue_head_t sem;
@@ -326,9 +334,14 @@ static void krping_cq_event_handler(struct ib_cq *cq, void *ctx)
 	ib_req_notify_cq(cb->cq, IB_CQ_NEXT_COMP);
 	while ((ret = ib_poll_cq(cb->cq, 1, &wc)) == 1) {
 		if (wc.status) {
-			printk(KERN_ERR PFX "cq completion failed status %d\n",
-				wc.status);
-			goto error;
+			if (wc.status == IB_WC_WR_FLUSH_ERR) {
+				DEBUG_LOG("cq flushed\n");
+				continue;
+			} else {
+				printk(KERN_ERR PFX "cq completion failed status %d\n",
+					wc.status);
+				goto error;
+			}
 		}
 
 		switch (wc.opcode) {
@@ -416,82 +429,170 @@ static int krping_accept(struct krping_cb *cb)
 
 static void krping_setup_wr(struct krping_cb *cb)
 {
-	cb->recv_sgl.addr = dma_map_single(cb->pd->device->dma_device, 
-					   &cb->recv_buf, 
-					   sizeof(cb->recv_buf), DMA_BIDIRECTIONAL);
-	pci_unmap_addr_set(cb, recv_mapping, cb->recv_sgl.addr);
+	cb->recv_sgl.addr = cb->recv_dma_addr;
 	cb->recv_sgl.length = sizeof cb->recv_buf;
-	cb->recv_sgl.lkey = cb->dma_mr->lkey;
+	if (cb->use_dmamr)
+		cb->recv_sgl.lkey = cb->dma_mr->lkey;
+	else
+		cb->recv_sgl.lkey = cb->recv_mr->lkey;
 	cb->rq_wr.sg_list = &cb->recv_sgl;
 	cb->rq_wr.num_sge = 1;
 
-	cb->send_sgl.addr = dma_map_single(cb->pd->device->dma_device, 
-					   &cb->send_buf, sizeof(cb->recv_buf),
-					   DMA_BIDIRECTIONAL);
-	pci_unmap_addr_set(cb, send_mapping, cb->send_sgl.addr);
+	cb->send_sgl.addr = cb->send_dma_addr;
 	cb->send_sgl.length = sizeof cb->send_buf;
-	cb->send_sgl.lkey = cb->dma_mr->lkey;
+	if (cb->use_dmamr)
+		cb->send_sgl.lkey = cb->dma_mr->lkey;
+	else
+		cb->send_sgl.lkey = cb->send_mr->lkey;
 
 	cb->sq_wr.opcode = IB_WR_SEND;
 	cb->sq_wr.send_flags = IB_SEND_SIGNALED;
 	cb->sq_wr.sg_list = &cb->send_sgl;
 	cb->sq_wr.num_sge = 1;
 
-	cb->rdma_addr = dma_map_single(cb->pd->device->dma_device, 
-				       cb->rdma_buf, cb->size, 
-				       DMA_BIDIRECTIONAL);
-	pci_unmap_addr_set(cb, rdma_mapping, cb->rdma_addr);
-	cb->rdma_sgl.addr = cb->rdma_addr;
-	cb->rdma_sgl.lkey = cb->dma_mr->lkey;
+	cb->rdma_sgl.addr = cb->rdma_dma_addr;
+	if (cb->use_dmamr)
+		cb->rdma_sgl.lkey = cb->dma_mr->lkey;
+	else
+		cb->rdma_sgl.lkey = cb->rdma_mr->lkey;
 	cb->rdma_sq_wr.send_flags = IB_SEND_SIGNALED;
 	cb->rdma_sq_wr.sg_list = &cb->rdma_sgl;
 	cb->rdma_sq_wr.num_sge = 1;
 
-	if (!cb->server) {
-		cb->start_addr = dma_map_single(cb->pd->device->dma_device, 
-					   cb->start_buf, cb->size, 
-					   DMA_BIDIRECTIONAL);
-		pci_unmap_addr_set(cb, start_mapping, cb->start_addr);
-	}
 }
 
 static int krping_setup_buffers(struct krping_cb *cb)
 {
 	int ret;
+	struct ib_phys_buf buf;
+	u64 iovbase;
 
-	DEBUG_LOG("krping_setup_buffers called on cb %p\n", cb);
+	DEBUG_LOG(PFX "krping_setup_buffers called on cb %p\n", cb);
 
-	cb->dma_mr = ib_get_dma_mr(cb->pd, IB_ACCESS_LOCAL_WRITE|
+	if (cb->use_dmamr) {
+		cb->dma_mr = ib_get_dma_mr(cb->pd, IB_ACCESS_LOCAL_WRITE|
 					   IB_ACCESS_REMOTE_READ|
 				           IB_ACCESS_REMOTE_WRITE);
-	if (IS_ERR(cb->dma_mr)) {
-		printk(KERN_ERR PFX "recv_buf reg_mr failed\n");
-		return PTR_ERR(cb->dma_mr);
+		if (IS_ERR(cb->dma_mr)) {
+			DEBUG_LOG(PFX "reg_dmamr failed\n");
+			return PTR_ERR(cb->dma_mr);
+		}
+	} else {
+
+		cb->recv_dma_addr = dma_map_single(cb->pd->device->dma_device, 
+					   &cb->recv_buf, 
+					   sizeof(cb->recv_buf), DMA_BIDIRECTIONAL);
+		pci_unmap_addr_set(cb, recv_mapping, cb->recv_dma_addr);
+		buf.addr = cb->recv_dma_addr;
+		buf.size = sizeof cb->recv_buf;
+		DEBUG_LOG(PFX "recv buf dma_addr %llx size %d\n", buf.addr, (int)buf.size);
+		iovbase = cb->recv_dma_addr;
+		cb->recv_mr = ib_reg_phys_mr(cb->pd, &buf, 1, 
+					     IB_ACCESS_LOCAL_WRITE, 
+					     &iovbase);
+
+		if (IS_ERR(cb->recv_mr)) {
+			DEBUG_LOG(PFX "recv_buf reg_mr failed\n");
+			return PTR_ERR(cb->recv_mr);
+		}
+
+		cb->send_dma_addr = dma_map_single(cb->pd->device->dma_device, 
+						   &cb->send_buf, sizeof(cb->send_buf),
+						   DMA_BIDIRECTIONAL);
+		pci_unmap_addr_set(cb, send_mapping, cb->send_dma_addr);
+		buf.addr = cb->send_dma_addr;
+		buf.size = sizeof cb->send_buf;
+		DEBUG_LOG(PFX "send buf dma_addr %llx size %d\n", buf.addr, (int)buf.size);
+		iovbase = cb->send_dma_addr;
+		cb->send_mr = ib_reg_phys_mr(cb->pd, &buf, 1, 
+					     0, &iovbase);
+
+		if (IS_ERR(cb->send_mr)) {
+			DEBUG_LOG(PFX "send_buf reg_mr failed\n");
+			ib_dereg_mr(cb->recv_mr);
+			return PTR_ERR(cb->send_mr);
+		}
 	}
 
 	cb->rdma_buf = kmalloc(cb->size, GFP_KERNEL);
 	if (!cb->rdma_buf) {
-		printk(KERN_ERR PFX "rdma_buf malloc failed\n");
+		DEBUG_LOG(PFX "rdma_buf malloc failed\n");
 		ret = -ENOMEM;
 		goto err1;
 	}
 
-	if (!cb->server) {
-		cb->start_buf = kmalloc(cb->size, GFP_KERNEL);
-		if (!cb->start_buf) {
-			printk(KERN_ERR PFX "start_buf malloc failed\n");
-			ret = -ENOMEM;
+	if (!cb->use_dmamr) {
+
+		cb->rdma_dma_addr = dma_map_single(cb->pd->device->dma_device, 
+				       cb->rdma_buf, cb->size, 
+				       DMA_BIDIRECTIONAL);
+		pci_unmap_addr_set(cb, rdma_mapping, cb->rdma_dma_addr);
+
+		buf.addr = cb->rdma_dma_addr;
+		buf.size = cb->size;
+		DEBUG_LOG(PFX "rdma buf dma_addr %llx size %d\n", buf.addr, (int)buf.size);
+		iovbase = cb->rdma_dma_addr;
+		cb->rdma_mr = ib_reg_phys_mr(cb->pd, &buf, 1, 
+					     IB_ACCESS_REMOTE_READ| 
+					     IB_ACCESS_REMOTE_WRITE, 
+					     &iovbase);
+
+		if (IS_ERR(cb->rdma_mr)) {
+			DEBUG_LOG(PFX "rdma_buf reg_mr failed\n");
+			ret = PTR_ERR(cb->rdma_mr);
 			goto err2;
 		}
 	}
 
+	if (!cb->server) {
+
+		cb->start_buf = kmalloc(cb->size, GFP_KERNEL);
+		if (!cb->start_buf) {
+			DEBUG_LOG(PFX "start_buf malloc failed\n");
+			ret = -ENOMEM;
+			goto err2;
+		}
+
+		cb->start_dma_addr = dma_map_single(cb->pd->device->dma_device, 
+						   cb->start_buf, cb->size, 
+						   DMA_BIDIRECTIONAL);
+		pci_unmap_addr_set(cb, start_mapping, cb->start_dma_addr);
+
+		if (!cb->use_dmamr) {
+
+			buf.addr = cb->start_dma_addr;
+			buf.size = cb->size;
+			DEBUG_LOG(PFX "start buf dma_addr %llx size %d\n", buf.addr, (int)buf.size);
+			iovbase = cb->start_dma_addr;
+			cb->start_mr = ib_reg_phys_mr(cb->pd, &buf, 1, 
+					     IB_ACCESS_REMOTE_READ,
+					     &iovbase);
+
+			if (IS_ERR(cb->start_mr)) {
+				DEBUG_LOG(PFX "start_buf reg_mr failed\n");
+				ret = PTR_ERR(cb->start_mr);
+				goto err3;
+			}
+		}
+	}
+
 	krping_setup_wr(cb);
-	DEBUG_LOG("allocated & registered buffers...\n");
+	DEBUG_LOG(PFX "allocated & registered buffers...\n");
 	return 0;
+err3:
+	kfree(cb->start_buf);
+
+	if (!cb->use_dmamr)
+		ib_dereg_mr(cb->rdma_mr);
 err2:
 	kfree(cb->rdma_buf);
 err1:
-	ib_dereg_mr(cb->dma_mr);
+	if (cb->use_dmamr)
+		ib_dereg_mr(cb->dma_mr);
+	else {
+		ib_dereg_mr(cb->recv_mr);
+		ib_dereg_mr(cb->send_mr);
+	}
 	return ret;
 }
 
@@ -499,6 +600,16 @@ static void krping_free_buffers(struct krping_cb *cb)
 {
 	DEBUG_LOG("krping_free_buffers called on cb %p\n", cb);
 	
+	if (cb->use_dmamr)
+		ib_dereg_mr(cb->dma_mr);
+	else {
+		ib_dereg_mr(cb->send_mr);
+		ib_dereg_mr(cb->recv_mr);
+		ib_dereg_mr(cb->rdma_mr);
+		if (!cb->server)
+			ib_dereg_mr(cb->start_mr);
+	}
+
 	dma_unmap_single(cb->pd->device->dma_device,
 			 pci_unmap_addr(cb, recv_mapping),
 			 sizeof(cb->recv_buf), DMA_BIDIRECTIONAL);
@@ -515,7 +626,6 @@ static void krping_free_buffers(struct krping_cb *cb)
 			 cb->size, DMA_BIDIRECTIONAL);
 		kfree(cb->start_buf);
 	}
-	ib_dereg_mr(cb->dma_mr);
 }
 
 static int krping_create_qp(struct krping_cb *cb)
@@ -646,7 +756,7 @@ static void krping_test_server(struct krping_cb *cb)
 
 		/* Display data in recv buf */
 		if (cb->verbose)
-			printk("server ping data: %s\n", cb->rdma_buf);
+			printk(KERN_INFO PFX "server ping data: %s\n", cb->rdma_buf);
 
 		/* Tell client to continue */
 		ret = ib_post_send(cb->qp, &cb->sq_wr, &bad_wr);
@@ -804,7 +914,10 @@ static void krping_test_client(struct krping_cb *cb)
 			start = 65;
 		cb->start_buf[cb->size - 1] = 0;
 
-		krping_format_send(cb, cb->start_addr, cb->dma_mr);
+		if (cb->use_dmamr)
+			krping_format_send(cb, cb->start_dma_addr, cb->dma_mr);
+		else
+			krping_format_send(cb, cb->start_dma_addr, cb->start_mr);
 		ret = ib_post_send(cb->qp, &cb->sq_wr, &bad_wr);
 		if (ret) {
 			printk(KERN_ERR PFX "post send error %d\n", ret);
@@ -820,7 +933,10 @@ static void krping_test_client(struct krping_cb *cb)
 			break;
 		}
 
-		krping_format_send(cb, cb->rdma_addr, cb->dma_mr);
+		if (cb->use_dmamr)
+			krping_format_send(cb, cb->rdma_dma_addr, cb->dma_mr);
+		else
+			krping_format_send(cb, cb->rdma_dma_addr, cb->rdma_mr);
 		ret = ib_post_send(cb->qp, &cb->sq_wr, &bad_wr);
 		if (ret) {
 			printk(KERN_ERR PFX "post send error %d\n", ret);
@@ -844,7 +960,7 @@ static void krping_test_client(struct krping_cb *cb)
 			}
 
 		if (cb->verbose)
-			printk("ping data: %s\n", cb->rdma_buf);
+			printk(KERN_INFO PFX "ping data: %s\n", cb->rdma_buf);
 	}
 }
 
