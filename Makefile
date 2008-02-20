@@ -1,16 +1,25 @@
 KSRC=/lib/modules/`uname -r`/source
 KOBJ=/lib/modules/`uname -r`/build
-OFA=/opt/ofa/ofa_1_3_kernel-20080116-1406
-CFLAGS += -DLINUX -D__KERNEL__ -DMODULE -O2 -pipe -Wall
-CFLAGS += -I$(OFA)/include -I$(KSRC)/include -I.
-CFLAGS += $(shell [ -f $(KSRC)/include/linux/modversions.h ] && \
+
+#
+# Use this if you're building on a OFED system.  Make sure you
+# configure the ofa_kernel-1.3 tree with the options from 
+# /etc/infiniband/info
+#
+OFA=/usr/src/ofa_kernel-1.3
+#
+# Use this if you're building against a kernel.org kernel with
+# rdma support enabled.
+# 
+#OFA=$(KSRC)
+EXTRA_CFLAGS += -DLINUX -D__KERNEL__ -DMODULE -O2 -pipe -Wall
+EXTRA_CFLAGS += -I$(OFA)/include -I$(KSRC)/include -I.
+EXTRA_CFLAGS += $(shell [ -f $(KSRC)/include/linux/modversions.h ] && \
             echo "-DMODVERSIONS -DEXPORT_SYMTAB \
                   -include $(KSRC)/include/linux/modversions.h")
-CFLAGS += $(shell [ -f $(KSRC)/include/config/modversions.h ] && \
+EXTRA_CFLAGS += $(shell [ -f $(KSRC)/include/config/modversions.h ] && \
             echo "-DMODVERSIONS -DEXPORT_SYMTAB \
                   -include $(KSRC)/include/config/modversions.h")
-
-CFLAGS += $(CFLAGS_EXTRA)
 
 obj-m += rdma_krping.o
 rdma_krping-y			:= getopt.o krping.o
