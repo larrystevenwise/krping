@@ -690,7 +690,7 @@ static int krping_setup_qp(struct krping_cb *cb, struct rdma_cm_id *cm_id)
 	DEBUG_LOG("created pd %p\n", cb->pd);
 
 	cb->cq = ib_create_cq(cm_id->device, krping_cq_event_handler, NULL,
-			      cb, cb->txdepth * 2);
+			      cb, cb->txdepth * 2, 0);
 	if (IS_ERR(cb->cq)) {
 		printk(KERN_ERR PFX "ib_create_cq failed\n");
 		ret = PTR_ERR(cb->cq);
@@ -902,9 +902,6 @@ static void wlat_test(struct krping_cb *cb)
 	int iters=cb->count;
 	volatile char *poll_buf = (char *) cb->start_buf;
 	char *buf = (char *)cb->rdma_buf;
-	ccnt = 0;
-	scnt = 0;
-	rcnt = 0;
 	struct timeval start_tv, stop_tv;
 	cycles_t *post_cycles_start, *post_cycles_stop;
 	cycles_t *poll_cycles_start, *poll_cycles_stop;
@@ -912,6 +909,10 @@ static void wlat_test(struct krping_cb *cb)
 	cycles_t sum_poll = 0, sum_post = 0, sum_last_poll = 0;
 	int i;
 	int cycle_iters = 1000;
+
+	ccnt = 0;
+	scnt = 0;
+	rcnt = 0;
 
 	post_cycles_start = kmalloc(cycle_iters * sizeof(cycles_t), GFP_KERNEL);
 	if (!post_cycles_start) {
@@ -1034,9 +1035,6 @@ static void bw_test(struct krping_cb *cb)
 {
 	int ccnt, scnt, rcnt;
 	int iters=cb->count;
-	ccnt = 0;
-	scnt = 0;
-	rcnt = 0;
 	struct timeval start_tv, stop_tv;
 	cycles_t *post_cycles_start, *post_cycles_stop;
 	cycles_t *poll_cycles_start, *poll_cycles_stop;
@@ -1044,6 +1042,10 @@ static void bw_test(struct krping_cb *cb)
 	cycles_t sum_poll = 0, sum_post = 0, sum_last_poll = 0;
 	int i;
 	int cycle_iters = 1000;
+
+	ccnt = 0;
+	scnt = 0;
+	rcnt = 0;
 
 	post_cycles_start = kmalloc(cycle_iters * sizeof(cycles_t), GFP_KERNEL);
 	if (!post_cycles_start) {
@@ -1160,7 +1162,7 @@ static void krping_rlat_test_server(struct krping_cb *cb)
 	}
 
 	/* Send STAG/TO/Len to client */
-	krping_format_send(cb, cb->start_addr, cb->dma_mr);
+	krping_format_send(cb, cb->start_dma_addr, cb->dma_mr);
 	ret = ib_post_send(cb->qp, &cb->sq_wr, &bad_wr);
 	if (ret) {
 		printk(KERN_ERR PFX "post send error %d\n", ret);
@@ -1193,7 +1195,7 @@ static void krping_wlat_test_server(struct krping_cb *cb)
 	}
 
 	/* Send STAG/TO/Len to client */
-	krping_format_send(cb, cb->start_addr, cb->dma_mr);
+	krping_format_send(cb, cb->start_dma_addr, cb->dma_mr);
 	ret = ib_post_send(cb->qp, &cb->sq_wr, &bad_wr);
 	if (ret) {
 		printk(KERN_ERR PFX "post send error %d\n", ret);
@@ -1227,7 +1229,7 @@ static void krping_bw_test_server(struct krping_cb *cb)
 	}
 
 	/* Send STAG/TO/Len to client */
-	krping_format_send(cb, cb->start_addr, cb->dma_mr);
+	krping_format_send(cb, cb->start_dma_addr, cb->dma_mr);
 	ret = ib_post_send(cb->qp, &cb->sq_wr, &bad_wr);
 	if (ret) {
 		printk(KERN_ERR PFX "post send error %d\n", ret);
@@ -1415,7 +1417,7 @@ static void krping_rlat_test_client(struct krping_cb *cb)
 	cb->state = RDMA_READ_ADV;
 
 	/* Send STAG/TO/Len to client */
-	krping_format_send(cb, cb->start_addr, cb->dma_mr);
+	krping_format_send(cb, cb->start_dma_addr, cb->dma_mr);
 	ret = ib_post_send(cb->qp, &cb->sq_wr, &bad_wr);
 	if (ret) {
 		printk(KERN_ERR PFX "post send error %d\n", ret);
@@ -1501,7 +1503,7 @@ static void krping_wlat_test_client(struct krping_cb *cb)
 	cb->state = RDMA_READ_ADV;
 
 	/* Send STAG/TO/Len to client */
-	krping_format_send(cb, cb->start_addr, cb->dma_mr);
+	krping_format_send(cb, cb->start_dma_addr, cb->dma_mr);
 	ret = ib_post_send(cb->qp, &cb->sq_wr, &bad_wr);
 	if (ret) {
 		printk(KERN_ERR PFX "post send error %d\n", ret);
@@ -1536,7 +1538,7 @@ static void krping_bw_test_client(struct krping_cb *cb)
 	cb->state = RDMA_READ_ADV;
 
 	/* Send STAG/TO/Len to client */
-	krping_format_send(cb, cb->start_addr, cb->dma_mr);
+	krping_format_send(cb, cb->start_dma_addr, cb->dma_mr);
 	ret = ib_post_send(cb->qp, &cb->sq_wr, &bad_wr);
 	if (ret) {
 		printk(KERN_ERR PFX "post send error %d\n", ret);
