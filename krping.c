@@ -953,7 +953,6 @@ static void wlat_test(struct krping_cb *cb)
 	do_gettimeofday(&start_tv);
 	while (scnt < iters || ccnt < iters || rcnt < iters) {
 
-		printk(KERN_ERR "%s %d\n", __FUNCTION__, __LINE__);
 		/* Wait till buffer changes. */
 		if (rcnt < iters && !(scnt < 1 && !cb->server)) {
 			++rcnt;
@@ -965,7 +964,6 @@ static void wlat_test(struct krping_cb *cb)
 			}
 		}
 
-		printk(KERN_ERR "%s %d\n", __FUNCTION__, __LINE__);
 		if (scnt < iters) {
 			struct ib_send_wr *bad_wr;
 
@@ -982,7 +980,6 @@ static void wlat_test(struct krping_cb *cb)
 			scnt++;
 		}
 
-		printk(KERN_ERR "%s %d\n", __FUNCTION__, __LINE__);
 		if (ccnt < iters) {
 			struct ib_wc wc;
 			int ne;
@@ -1012,7 +1009,6 @@ static void wlat_test(struct krping_cb *cb)
 				return;
 			}
 		}
-		printk(KERN_ERR "%s %d\n", __FUNCTION__, __LINE__);
 	}
 	do_gettimeofday(&stop_tv);
 
