@@ -561,7 +561,7 @@ static int krping_setup_buffers(struct krping_cb *cb)
 		}
 	}
 
-	if (!cb->server) {
+	if (!cb->server || cb->wlat || cb->rlat || cb->bw) {
 
 		cb->start_buf = kmalloc(cb->size, GFP_KERNEL);
 		if (!cb->start_buf) {
@@ -576,13 +576,17 @@ static int krping_setup_buffers(struct krping_cb *cb)
 		pci_unmap_addr_set(cb, start_mapping, cb->start_dma_addr);
 
 		if (!cb->use_dmamr) {
+			unsigned flags = IB_ACCESS_REMOTE_READ;
+
+			if (cb->wlat || cb->rlat || cb->bw)
+				flags |= IB_ACCESS_REMOTE_WRITE;
 
 			buf.addr = cb->start_dma_addr;
 			buf.size = cb->size;
 			DEBUG_LOG(PFX "start buf dma_addr %llx size %d\n", buf.addr, (int)buf.size);
 			iovbase = cb->start_dma_addr;
 			cb->start_mr = ib_reg_phys_mr(cb->pd, &buf, 1, 
-					     IB_ACCESS_REMOTE_READ,
+					     flags,
 					     &iovbase);
 
 			if (IS_ERR(cb->start_mr)) {
@@ -949,6 +953,7 @@ static void wlat_test(struct krping_cb *cb)
 	do_gettimeofday(&start_tv);
 	while (scnt < iters || ccnt < iters || rcnt < iters) {
 
+		printk(KERN_ERR "%s %d\n", __FUNCTION__, __LINE__);
 		/* Wait till buffer changes. */
 		if (rcnt < iters && !(scnt < 1 && !cb->server)) {
 			++rcnt;
@@ -960,6 +965,7 @@ static void wlat_test(struct krping_cb *cb)
 			}
 		}
 
+		printk(KERN_ERR "%s %d\n", __FUNCTION__, __LINE__);
 		if (scnt < iters) {
 			struct ib_send_wr *bad_wr;
 
@@ -976,6 +982,7 @@ static void wlat_test(struct krping_cb *cb)
 			scnt++;
 		}
 
+		printk(KERN_ERR "%s %d\n", __FUNCTION__, __LINE__);
 		if (ccnt < iters) {
 			struct ib_wc wc;
 			int ne;
@@ -1005,6 +1012,7 @@ static void wlat_test(struct krping_cb *cb)
 				return;
 			}
 		}
+		printk(KERN_ERR "%s %d\n", __FUNCTION__, __LINE__);
 	}
 	do_gettimeofday(&stop_tv);
 
@@ -1162,7 +1170,10 @@ static void krping_rlat_test_server(struct krping_cb *cb)
 	}
 
 	/* Send STAG/TO/Len to client */
-	krping_format_send(cb, cb->start_dma_addr, cb->dma_mr);
+	if (cb->use_dmamr)
+		krping_format_send(cb, cb->start_dma_addr, cb->dma_mr);
+	else
+		krping_format_send(cb, cb->start_dma_addr, cb->start_mr);
 	ret = ib_post_send(cb->qp, &cb->sq_wr, &bad_wr);
 	if (ret) {
 		printk(KERN_ERR PFX "post send error %d\n", ret);
@@ -1195,7 +1206,10 @@ static void krping_wlat_test_server(struct krping_cb *cb)
 	}
 
 	/* Send STAG/TO/Len to client */
-	krping_format_send(cb, cb->start_dma_addr, cb->dma_mr);
+	if (cb->use_dmamr)
+		krping_format_send(cb, cb->start_dma_addr, cb->dma_mr);
+	else
+		krping_format_send(cb, cb->start_dma_addr, cb->start_mr);
 	ret = ib_post_send(cb->qp, &cb->sq_wr, &bad_wr);
 	if (ret) {
 		printk(KERN_ERR PFX "post send error %d\n", ret);
@@ -1229,7 +1243,10 @@ static void krping_bw_test_server(struct krping_cb *cb)
 	}
 
 	/* Send STAG/TO/Len to client */
-	krping_format_send(cb, cb->start_dma_addr, cb->dma_mr);
+	if (cb->use_dmamr)
+		krping_format_send(cb, cb->start_dma_addr, cb->dma_mr);
+	else
+		krping_format_send(cb, cb->start_dma_addr, cb->start_mr);
 	ret = ib_post_send(cb->qp, &cb->sq_wr, &bad_wr);
 	if (ret) {
 		printk(KERN_ERR PFX "post send error %d\n", ret);
@@ -1417,7 +1434,10 @@ static void krping_rlat_test_client(struct krping_cb *cb)
 	cb->state = RDMA_READ_ADV;
 
 	/* Send STAG/TO/Len to client */
-	krping_format_send(cb, cb->start_dma_addr, cb->dma_mr);
+	if (cb->use_dmamr)
+		krping_format_send(cb, cb->start_dma_addr, cb->dma_mr);
+	else
+		krping_format_send(cb, cb->start_dma_addr, cb->start_mr);
 	ret = ib_post_send(cb->qp, &cb->sq_wr, &bad_wr);
 	if (ret) {
 		printk(KERN_ERR PFX "post send error %d\n", ret);
@@ -1503,7 +1523,10 @@ static void krping_wlat_test_client(struct krping_cb *cb)
 	cb->state = RDMA_READ_ADV;
 
 	/* Send STAG/TO/Len to client */
-	krping_format_send(cb, cb->start_dma_addr, cb->dma_mr);
+	if (cb->use_dmamr)
+		krping_format_send(cb, cb->start_dma_addr, cb->dma_mr);
+	else
+		krping_format_send(cb, cb->start_dma_addr, cb->start_mr);
 	ret = ib_post_send(cb->qp, &cb->sq_wr, &bad_wr);
 	if (ret) {
 		printk(KERN_ERR PFX "post send error %d\n", ret);
@@ -1538,7 +1561,10 @@ static void krping_bw_test_client(struct krping_cb *cb)
 	cb->state = RDMA_READ_ADV;
 
 	/* Send STAG/TO/Len to client */
-	krping_format_send(cb, cb->start_dma_addr, cb->dma_mr);
+	if (cb->use_dmamr)
+		krping_format_send(cb, cb->start_dma_addr, cb->dma_mr);
+	else
+		krping_format_send(cb, cb->start_dma_addr, cb->start_mr);
 	ret = ib_post_send(cb->qp, &cb->sq_wr, &bad_wr);
 	if (ret) {
 		printk(KERN_ERR PFX "post send error %d\n", ret);
