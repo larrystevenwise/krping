@@ -1,0 +1,12 @@
+
+{
+	if ($2 == "delta") {
+		sec=$4;
+		usec=$7;
+		iter=$9;
+		size=$11;
+		time=sec+(usec/1000000)
+		bytes=iter*size
+		printf("%u %f %f\n", size, 1 / (iter / time) / 2 * 1000*1000, iter/time);
+	}
+}
