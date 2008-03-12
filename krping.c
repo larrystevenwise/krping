@@ -80,6 +80,7 @@ static const struct krping_option krping_opts[] = {
  	{"bw", OPT_NOPARAM, 'B'},
  	{"duplex", OPT_NOPARAM, 'D'},
  	{"txdepth", OPT_INT, 'T'},
+ 	{"poll", OPT_NOPARAM, 'P'},
 	{NULL, 0, 0}
 };
 
@@ -213,6 +214,7 @@ struct krping_cb {
 	int rlat;			/* run rlat test */
 	int bw;				/* run bw test */
 	int duplex;			/* run bw full duplex test */
+	int poll;			/* poll or block for rlat test */
 	int txdepth;			/* SQ depth */
 
 	/* CM stuff */
@@ -855,8 +857,13 @@ static void rlat_test(struct krping_cb *cb)
 	cb->rdma_sq_wr.sg_list->length = cb->size;
 
 	do_gettimeofday(&start_tv);
+	if (!cb->poll) {
+		cb->state = RDMA_READ_ADV;
+		ib_req_notify_cq(cb->cq, IB_CQ_NEXT_COMP);
+	}
 	while (scnt < iters) {
 
+		cb->state = RDMA_READ_ADV;
 		ret = ib_post_send(cb->qp, &cb->rdma_sq_wr, &bad_wr);
 		if (ret) {
 			printk(KERN_ERR PFX  
@@ -866,7 +873,16 @@ static void rlat_test(struct krping_cb *cb)
 		}
 
 		do {
-			ne = ib_poll_cq(cb->cq, 1, &wc);
+			if (!cb->poll) {
+				wait_event_interruptible(cb->sem, cb->state != RDMA_READ_ADV);
+				if (cb->state == RDMA_READ_COMPLETE) {
+					ne = 1;
+					ib_req_notify_cq(cb->cq, IB_CQ_NEXT_COMP);
+				} else {
+					ne = -1;
+				}
+			} else
+				ne = ib_poll_cq(cb->cq, 1, &wc);
 			if (cb->state == ERROR) {
 				printk(KERN_ERR PFX 
 				       "state == ERROR...bailing scnt %d\n", scnt);
@@ -878,7 +894,7 @@ static void rlat_test(struct krping_cb *cb)
 			printk(KERN_ERR PFX "poll CQ failed %d\n", ne);
 			return;
 		}
-		if (wc.status != IB_WC_SUCCESS) {
+		if (cb->poll && wc.status != IB_WC_SUCCESS) {
 			printk(KERN_ERR PFX "Completion wth error at %s:\n",
 				cb->server ? "server" : "client");
 			printk(KERN_ERR PFX "Failed status %d: wr_id %d\n",
@@ -1722,6 +1738,10 @@ int krping_doit(char *cmd)
 		case 'p':
 			cb->port = htons(optint);
 			DEBUG_LOG("port %d\n", (int)optint);
+			break;
+		case 'P':
+			cb->poll = 1;
+			DEBUG_LOG("server\n");
 			break;
 		case 's':
 			cb->server = 1;
