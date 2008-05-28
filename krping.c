@@ -65,6 +65,13 @@ MODULE_AUTHOR("Steve Wise");
 MODULE_DESCRIPTION("RDMA ping server");
 MODULE_LICENSE("Dual BSD/GPL");
 
+enum mem_type {
+	DMA = 1,
+	FASTREG = 2,
+	WINDOW = 3,
+	MR = 4
+};
+
 static const struct krping_option krping_opts[] = {
 	{"count", OPT_INT, 'C'},
 	{"size", OPT_INT, 'S'},
@@ -74,11 +81,11 @@ static const struct krping_option krping_opts[] = {
 	{"validate", OPT_NOPARAM, 'V'},
 	{"server", OPT_NOPARAM, 's'},
 	{"client", OPT_NOPARAM, 'c'},
-	{"dmamr", OPT_NOPARAM, 'D'},
+	{"mem_mode", OPT_STRING, 'm'},
  	{"wlat", OPT_NOPARAM, 'l'},
  	{"rlat", OPT_NOPARAM, 'L'},
  	{"bw", OPT_NOPARAM, 'B'},
- 	{"duplex", OPT_NOPARAM, 'D'},
+ 	{"duplex", OPT_NOPARAM, 'd'},
  	{"txdepth", OPT_INT, 'T'},
  	{"poll", OPT_NOPARAM, 'P'},
 	{NULL, 0, 0}
@@ -166,8 +173,13 @@ struct krping_cb {
 	struct ib_cq *cq;
 	struct ib_pd *pd;
 	struct ib_qp *qp;
+
+	enum mem_type mem;
 	struct ib_mr *dma_mr;
-	int use_dmamr;
+	struct ib_fast_reg_page_list *page_list;
+	int page_list_len;
+	struct ib_send_wr fastreg_wr;
+	struct ib_send_wr invalidate_wr;
 
 	struct ib_recv_wr rq_wr;	/* recv work request record */
 	struct ib_sge recv_sgl;		/* recv single SGE */
@@ -450,7 +462,7 @@ static void krping_setup_wr(struct krping_cb *cb)
 {
 	cb->recv_sgl.addr = cb->recv_dma_addr;
 	cb->recv_sgl.length = sizeof cb->recv_buf;
-	if (cb->use_dmamr)
+	if (cb->mem == DMA)
 		cb->recv_sgl.lkey = cb->dma_mr->lkey;
 	else
 		cb->recv_sgl.lkey = cb->recv_mr->lkey;
@@ -459,7 +471,7 @@ static void krping_setup_wr(struct krping_cb *cb)
 
 	cb->send_sgl.addr = cb->send_dma_addr;
 	cb->send_sgl.length = sizeof cb->send_buf;
-	if (cb->use_dmamr)
+	if (cb->mem == DMA)
 		cb->send_sgl.lkey = cb->dma_mr->lkey;
 	else
 		cb->send_sgl.lkey = cb->send_mr->lkey;
@@ -470,13 +482,37 @@ static void krping_setup_wr(struct krping_cb *cb)
 	cb->sq_wr.num_sge = 1;
 
 	cb->rdma_sgl.addr = cb->rdma_dma_addr;
-	if (cb->use_dmamr)
+	if (cb->mem == DMA)
 		cb->rdma_sgl.lkey = cb->dma_mr->lkey;
 	else
 		cb->rdma_sgl.lkey = cb->rdma_mr->lkey;
 	cb->rdma_sq_wr.send_flags = IB_SEND_SIGNALED;
 	cb->rdma_sq_wr.sg_list = &cb->rdma_sgl;
 	cb->rdma_sq_wr.num_sge = 1;
+
+	if (cb->mem == FASTREG) {
+		u64 p;
+		int i;
+
+		cb->fastreg_wr.wr.fast_reg.page_shift = PAGE_SHIFT;
+		cb->fastreg_wr.wr.fast_reg.length = cb->size;
+		cb->fastreg_wr.wr.fast_reg.iova_start = (u64)cb->rdma_dma_addr;
+		cb->fastreg_wr.wr.fast_reg.first_byte_offset = cb->rdma_dma_addr & ~PAGE_MASK;
+		cb->fastreg_wr.wr.fast_reg.page_list = cb->page_list;
+		cb->fastreg_wr.wr.fast_reg.page_list_len = cb->page_list_len;
+		p = (u64)((u64)cb->rdma_dma_addr & PAGE_MASK);
+		printk(KERN_INFO "%s shift %u len %u iova_start %llx fbo %u page_list_len %u\n",
+			__func__, 
+			cb->fastreg_wr.wr.fast_reg.page_shift,
+			cb->fastreg_wr.wr.fast_reg.length,
+			cb->fastreg_wr.wr.fast_reg.iova_start,
+			cb->fastreg_wr.wr.fast_reg.first_byte_offset,
+			cb->fastreg_wr.wr.fast_reg.page_list_len);
+		for (i=0; i < cb->fastreg_wr.wr.fast_reg.page_list_len; i++, p += PAGE_SIZE) {
+			cb->page_list->page_list[i] = p;
+			printk(KERN_INFO "page_list[%d] 0x%llx\n", i, p);
+		}
+	}
 
 }
 
@@ -488,7 +524,16 @@ static int krping_setup_buffers(struct krping_cb *cb)
 
 	DEBUG_LOG(PFX "krping_setup_buffers called on cb %p\n", cb);
 
-	if (cb->use_dmamr) {
+	cb->recv_dma_addr = dma_map_single(cb->pd->device->dma_device, 
+				   &cb->recv_buf, 
+				   sizeof(cb->recv_buf), DMA_BIDIRECTIONAL);
+	pci_unmap_addr_set(cb, recv_mapping, cb->recv_dma_addr);
+	cb->send_dma_addr = dma_map_single(cb->pd->device->dma_device, 
+					   &cb->send_buf, sizeof(cb->send_buf),
+					   DMA_BIDIRECTIONAL);
+	pci_unmap_addr_set(cb, send_mapping, cb->send_dma_addr);
+
+	if (cb->mem == DMA) {
 		cb->dma_mr = ib_get_dma_mr(cb->pd, IB_ACCESS_LOCAL_WRITE|
 					   IB_ACCESS_REMOTE_READ|
 				           IB_ACCESS_REMOTE_WRITE);
@@ -498,10 +543,6 @@ static int krping_setup_buffers(struct krping_cb *cb)
 		}
 	} else {
 
-		cb->recv_dma_addr = dma_map_single(cb->pd->device->dma_device, 
-					   &cb->recv_buf, 
-					   sizeof(cb->recv_buf), DMA_BIDIRECTIONAL);
-		pci_unmap_addr_set(cb, recv_mapping, cb->recv_dma_addr);
 		buf.addr = cb->recv_dma_addr;
 		buf.size = sizeof cb->recv_buf;
 		DEBUG_LOG(PFX "recv buf dma_addr %llx size %d\n", buf.addr, (int)buf.size);
@@ -515,10 +556,6 @@ static int krping_setup_buffers(struct krping_cb *cb)
 			return PTR_ERR(cb->recv_mr);
 		}
 
-		cb->send_dma_addr = dma_map_single(cb->pd->device->dma_device, 
-						   &cb->send_buf, sizeof(cb->send_buf),
-						   DMA_BIDIRECTIONAL);
-		pci_unmap_addr_set(cb, send_mapping, cb->send_dma_addr);
 		buf.addr = cb->send_dma_addr;
 		buf.size = sizeof cb->send_buf;
 		DEBUG_LOG(PFX "send buf dma_addr %llx size %d\n", buf.addr, (int)buf.size);
@@ -540,26 +577,49 @@ static int krping_setup_buffers(struct krping_cb *cb)
 		goto err1;
 	}
 
-	if (!cb->use_dmamr) {
-
-		cb->rdma_dma_addr = dma_map_single(cb->pd->device->dma_device, 
-				       cb->rdma_buf, cb->size, 
-				       DMA_BIDIRECTIONAL);
-		pci_unmap_addr_set(cb, rdma_mapping, cb->rdma_dma_addr);
-
-		buf.addr = cb->rdma_dma_addr;
-		buf.size = cb->size;
-		DEBUG_LOG(PFX "rdma buf dma_addr %llx size %d\n", buf.addr, (int)buf.size);
-		iovbase = cb->rdma_dma_addr;
-		cb->rdma_mr = ib_reg_phys_mr(cb->pd, &buf, 1, 
+	cb->rdma_dma_addr = dma_map_single(cb->pd->device->dma_device, 
+			       cb->rdma_buf, cb->size, 
+			       DMA_BIDIRECTIONAL);
+	pci_unmap_addr_set(cb, rdma_mapping, cb->rdma_dma_addr);
+	if (cb->mem != DMA) {
+		if (cb->mem == FASTREG) {
+			cb->page_list_len = (((cb->size - 1) & PAGE_MASK) + PAGE_SIZE) >> PAGE_SHIFT;
+			cb->page_list = ib_alloc_fast_reg_page_list(cb->pd->device, cb->page_list_len);
+			if (IS_ERR(cb->page_list)) {
+				DEBUG_LOG(PFX "recv_buf reg_mr failed\n");
+				ret = PTR_ERR(cb->recv_mr);
+				goto err2;
+			}
+			printk("%s page_list %p page_list_len %u\n", __func__, cb->page_list, 
+				cb->page_list_len);
+#if 0
+			cb->rdma_mr = ib_alloc_fast_reg_mr(cb->pd, cb->page_list->max_page_list_len);
+#else
+			buf.addr = cb->rdma_dma_addr;
+			buf.size = cb->size;
+			DEBUG_LOG(PFX "rdma buf dma_addr %llx size %d\n", buf.addr, (int)buf.size);
+			iovbase = cb->rdma_dma_addr;
+			cb->rdma_mr = ib_reg_phys_mr(cb->pd, &buf, 1, 
 					     IB_ACCESS_REMOTE_READ| 
 					     IB_ACCESS_REMOTE_WRITE, 
 					     &iovbase);
+#endif
+			
+		} else {
+			buf.addr = cb->rdma_dma_addr;
+			buf.size = cb->size;
+			DEBUG_LOG(PFX "rdma buf dma_addr %llx size %d\n", buf.addr, (int)buf.size);
+			iovbase = cb->rdma_dma_addr;
+			cb->rdma_mr = ib_reg_phys_mr(cb->pd, &buf, 1, 
+					     IB_ACCESS_REMOTE_READ| 
+					     IB_ACCESS_REMOTE_WRITE, 
+					     &iovbase);
+		}
 
 		if (IS_ERR(cb->rdma_mr)) {
 			DEBUG_LOG(PFX "rdma_buf reg_mr failed\n");
 			ret = PTR_ERR(cb->rdma_mr);
-			goto err2;
+			goto err3;
 		}
 	}
 
@@ -569,7 +629,7 @@ static int krping_setup_buffers(struct krping_cb *cb)
 		if (!cb->start_buf) {
 			DEBUG_LOG(PFX "start_buf malloc failed\n");
 			ret = -ENOMEM;
-			goto err2;
+			goto err3;
 		}
 
 		cb->start_dma_addr = dma_map_single(cb->pd->device->dma_device, 
@@ -577,7 +637,7 @@ static int krping_setup_buffers(struct krping_cb *cb)
 						   DMA_BIDIRECTIONAL);
 		pci_unmap_addr_set(cb, start_mapping, cb->start_dma_addr);
 
-		if (!cb->use_dmamr) {
+		if (cb->mem != DMA) {
 			unsigned flags = IB_ACCESS_REMOTE_READ;
 
 			if (cb->wlat || cb->rlat || cb->bw)
@@ -594,7 +654,7 @@ static int krping_setup_buffers(struct krping_cb *cb)
 			if (IS_ERR(cb->start_mr)) {
 				DEBUG_LOG(PFX "start_buf reg_mr failed\n");
 				ret = PTR_ERR(cb->start_mr);
-				goto err3;
+				goto err4;
 			}
 		}
 	}
@@ -602,15 +662,17 @@ static int krping_setup_buffers(struct krping_cb *cb)
 	krping_setup_wr(cb);
 	DEBUG_LOG(PFX "allocated & registered buffers...\n");
 	return 0;
-err3:
+err4:
 	kfree(cb->start_buf);
 
-	if (!cb->use_dmamr)
+	if (cb->mem != DMA)
 		ib_dereg_mr(cb->rdma_mr);
+err3:
+	ib_free_fast_reg_page_list(cb->page_list);
 err2:
 	kfree(cb->rdma_buf);
 err1:
-	if (cb->use_dmamr)
+	if (cb->mem == DMA)
 		ib_dereg_mr(cb->dma_mr);
 	else {
 		ib_dereg_mr(cb->recv_mr);
@@ -623,7 +685,7 @@ static void krping_free_buffers(struct krping_cb *cb)
 {
 	DEBUG_LOG("krping_free_buffers called on cb %p\n", cb);
 	
-	if (cb->use_dmamr)
+	if (cb->mem == DMA)
 		ib_dereg_mr(cb->dma_mr);
 	else {
 		ib_dereg_mr(cb->send_mr);
@@ -1182,7 +1244,7 @@ static void krping_rlat_test_server(struct krping_cb *cb)
 	}
 
 	/* Send STAG/TO/Len to client */
-	if (cb->use_dmamr)
+	if (cb->mem == DMA)
 		krping_format_send(cb, cb->start_dma_addr, cb->dma_mr);
 	else
 		krping_format_send(cb, cb->start_dma_addr, cb->start_mr);
@@ -1218,7 +1280,7 @@ static void krping_wlat_test_server(struct krping_cb *cb)
 	}
 
 	/* Send STAG/TO/Len to client */
-	if (cb->use_dmamr)
+	if (cb->mem == DMA)
 		krping_format_send(cb, cb->start_dma_addr, cb->dma_mr);
 	else
 		krping_format_send(cb, cb->start_dma_addr, cb->start_mr);
@@ -1255,7 +1317,7 @@ static void krping_bw_test_server(struct krping_cb *cb)
 	}
 
 	/* Send STAG/TO/Len to client */
-	if (cb->use_dmamr)
+	if (cb->mem == DMA)
 		krping_format_send(cb, cb->start_dma_addr, cb->dma_mr);
 	else
 		krping_format_send(cb, cb->start_dma_addr, cb->start_mr);
@@ -1387,7 +1449,7 @@ static void krping_test_client(struct krping_cb *cb)
 			start = 65;
 		cb->start_buf[cb->size - 1] = 0;
 
-		if (cb->use_dmamr)
+		if (cb->mem == DMA)
 			krping_format_send(cb, cb->start_dma_addr, cb->dma_mr);
 		else
 			krping_format_send(cb, cb->start_dma_addr, cb->start_mr);
@@ -1406,7 +1468,7 @@ static void krping_test_client(struct krping_cb *cb)
 			break;
 		}
 
-		if (cb->use_dmamr)
+		if (cb->mem == DMA)
 			krping_format_send(cb, cb->rdma_dma_addr, cb->dma_mr);
 		else
 			krping_format_send(cb, cb->rdma_dma_addr, cb->rdma_mr);
@@ -1446,7 +1508,7 @@ static void krping_rlat_test_client(struct krping_cb *cb)
 	cb->state = RDMA_READ_ADV;
 
 	/* Send STAG/TO/Len to client */
-	if (cb->use_dmamr)
+	if (cb->mem == DMA)
 		krping_format_send(cb, cb->start_dma_addr, cb->dma_mr);
 	else
 		krping_format_send(cb, cb->start_dma_addr, cb->start_mr);
@@ -1535,7 +1597,7 @@ static void krping_wlat_test_client(struct krping_cb *cb)
 	cb->state = RDMA_READ_ADV;
 
 	/* Send STAG/TO/Len to client */
-	if (cb->use_dmamr)
+	if (cb->mem == DMA)
 		krping_format_send(cb, cb->start_dma_addr, cb->dma_mr);
 	else
 		krping_format_send(cb, cb->start_dma_addr, cb->start_mr);
@@ -1573,7 +1635,7 @@ static void krping_bw_test_client(struct krping_cb *cb)
 	cb->state = RDMA_READ_ADV;
 
 	/* Send STAG/TO/Len to client */
-	if (cb->use_dmamr)
+	if (cb->mem == DMA)
 		krping_format_send(cb, cb->start_dma_addr, cb->dma_mr);
 	else
 		krping_format_send(cb, cb->start_dma_addr, cb->start_mr);
@@ -1788,11 +1850,25 @@ int krping_doit(char *cmd)
 		case 'B':
 			cb->bw++;
 			break;
-		case 'D':
+		case 'd':
 			cb->duplex++;
 			break;
-		case 'd':
-			debug++;
+		case 'm':
+			if (!strncmp(optarg, "dma", 3))
+				cb->mem = DMA;
+			else if (!strncmp(optarg, "fastreg", 7))
+				cb->mem = FASTREG;
+			else if (!strncmp(optarg, "window", 6))
+				cb->mem = WINDOW;
+			else if (!strncmp(optarg, "mr", 2))
+				cb->mem = MR;
+			else {
+				printk(KERN_ERR PFX "unknown mem mode %s.  "
+					"Must be dma, fastreg, window, or mr\n",
+					optarg);
+				ret = -EINVAL;
+				break;
+			}
 			break;
 		case 'T':
 			cb->txdepth = optint;
