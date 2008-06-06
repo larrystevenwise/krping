@@ -82,6 +82,7 @@ static const struct krping_option krping_opts[] = {
 	{"server", OPT_NOPARAM, 's'},
 	{"client", OPT_NOPARAM, 'c'},
 	{"mem_mode", OPT_STRING, 'm'},
+	{"server_invalidate", OPT_NOPARAM, 'I'},
  	{"wlat", OPT_NOPARAM, 'l'},
  	{"rlat", OPT_NOPARAM, 'L'},
  	{"bw", OPT_NOPARAM, 'B'},
@@ -176,11 +177,13 @@ struct krping_cb {
 
 	enum mem_type mem;
 	struct ib_mr *dma_mr;
+
 	struct ib_fast_reg_page_list *page_list;
 	int page_list_len;
 	struct ib_send_wr fastreg_wr;
 	struct ib_send_wr invalidate_wr;
 	struct ib_mr *fastreg_mr;
+	int server_invalidate;
 
 	struct ib_recv_wr rq_wr;	/* recv work request record */
 	struct ib_sge recv_sgl;		/* recv single SGE */
@@ -799,7 +802,7 @@ static void krping_format_send(struct krping_cb *cb, u64 buf,
 	 * For fastreg mode, invalidate the old rkey, set a new key value
 	 * and fastreg the new rkey.
 	 */
-	if (cb->mem == FASTREG) {
+	if (!cb->server && cb->mem == FASTREG) {
 
 		mr = cb->fastreg_mr;
 		cb->invalidate_wr.wr.local_inv.rkey = mr->rkey;
@@ -836,9 +839,14 @@ static void krping_format_send(struct krping_cb *cb, u64 buf,
 			cb->fastreg_wr.wr.fast_reg.page_list_len);
 
 		/* 
-		 * Posting a WR chain: invalidate->fastreg->NULL 
+		 * If the server is invalidating out stags, then
+		 * post just the fastreg, otherwise post the 
+		 * invalidate+fastreg.
 		 */
-		ret = ib_post_send(cb->qp, &cb->invalidate_wr, &bad_wr);
+		if (cb->server_invalidate)
+			ret = ib_post_send(cb->qp, &cb->fastreg_wr, &bad_wr);
+		else
+			ret = ib_post_send(cb->qp, &cb->invalidate_wr, &bad_wr);
 		if (ret) {
 			printk(KERN_ERR PFX "post send error %d\n", ret);
 			cb->state = ERROR;
@@ -899,6 +907,11 @@ static void krping_test_server(struct krping_cb *cb)
 				cb->rdma_buf);
 
 		/* Tell client to continue */
+		if (cb->server && cb->server_invalidate) {
+			cb->sq_wr.ex.invalidate_rkey = cb->remote_rkey;
+			cb->sq_wr.opcode = IB_WR_SEND_WITH_INV;
+			DEBUG_LOG("send-w-inv rkey 0x%x\n", cb->remote_rkey);
+		} 
 		ret = ib_post_send(cb->qp, &cb->sq_wr, &bad_wr);
 		if (ret) {
 			printk(KERN_ERR PFX "post send error %d\n", ret);
@@ -946,6 +959,11 @@ static void krping_test_server(struct krping_cb *cb)
 		cb->state = CONNECTED;
 
 		/* Tell client to begin again */
+		if (cb->server && cb->server_invalidate) {
+			cb->sq_wr.ex.invalidate_rkey = cb->remote_rkey;
+			cb->sq_wr.opcode = IB_WR_SEND_WITH_INV;
+			DEBUG_LOG("send-w-inv rkey 0x%x\n", cb->remote_rkey);
+		} 
 		ret = ib_post_send(cb->qp, &cb->sq_wr, &bad_wr);
 		if (ret) {
 			printk(KERN_ERR PFX "post send error %d\n", ret);
@@ -1947,6 +1965,9 @@ int krping_doit(char *cmd)
 				break;
 			}
 			break;
+		case 'I':
+			cb->server_invalidate = 1;
+			break;
 		case 'T':
 			cb->txdepth = optint;
 			DEBUG_LOG("txdepth %d\n", (int) cb->txdepth);
@@ -1971,6 +1992,13 @@ int krping_doit(char *cmd)
 		ret = -EINVAL;
 		goto out;
 	}
+
+	if (cb->server_invalidate && cb->mem != FASTREG) {
+		printk(KERN_ERR PFX "server_invalidate only valid with fastreg mem_mode\n");
+		ret = -EINVAL;
+		goto out;
+	}
+
 
 	cb->cm_id = rdma_create_id(krping_cma_event_handler, cb, RDMA_PS_TCP);
 	if (IS_ERR(cb->cm_id)) {
