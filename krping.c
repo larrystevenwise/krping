@@ -790,10 +790,8 @@ static void krping_format_send(struct krping_cb *cb, u64 buf,
 			       struct ib_mr *mr)
 {
 	struct krping_rdma_info *info = &cb->send_buf;
-#ifdef notyet
 	int ret;
 	struct ib_send_wr *bad_wr;
-#endif
 	int i;
 	u64 p;
 
@@ -802,7 +800,6 @@ static void krping_format_send(struct krping_cb *cb, u64 buf,
 	 * and fastreg the new rkey.
 	 */
 	if (cb->mem == FASTREG) {
-		struct ib_mr *save = mr;
 
 		mr = cb->fastreg_mr;
 		cb->invalidate_wr.wr.local_inv.rkey = mr->rkey;
@@ -816,6 +813,10 @@ static void krping_format_send(struct krping_cb *cb, u64 buf,
 		/*
 		 * Update the fastreg WR with new buf info.
 		 */
+		if (buf == (u64)cb->start_dma_addr)
+			cb->fastreg_wr.wr.fast_reg.access_flags = IB_ACCESS_REMOTE_READ;
+		else
+			cb->fastreg_wr.wr.fast_reg.access_flags = IB_ACCESS_REMOTE_WRITE;
 		cb->fastreg_wr.wr.fast_reg.iova_start = buf;
 		cb->fastreg_wr.wr.fast_reg.first_byte_offset = buf & ~PAGE_MASK;
 		p = (u64)(buf & PAGE_MASK);
@@ -833,7 +834,7 @@ static void krping_format_send(struct krping_cb *cb, u64 buf,
 			cb->fastreg_wr.wr.fast_reg.iova_start,
 			cb->fastreg_wr.wr.fast_reg.first_byte_offset,
 			cb->fastreg_wr.wr.fast_reg.page_list_len);
-#ifdef notyet
+
 		/* 
 		 * Posting a WR chain: invalidate->fastreg->NULL 
 		 */
@@ -843,9 +844,6 @@ static void krping_format_send(struct krping_cb *cb, u64 buf,
 			cb->state = ERROR;
 			return;
 		}
-#else
-		mr = save;
-#endif
 	}
 	info->buf = htonll(buf);
 	info->rkey = htonl(mr->rkey);
@@ -1570,6 +1568,9 @@ static void krping_test_client(struct krping_cb *cb)
 
 		if (cb->verbose)
 			printk(KERN_INFO PFX "ping data: %s\n", cb->rdma_buf);
+#ifdef SLOW_KRPING
+		wait_event_interruptible_timeout(cb->sem, cb->state == ERROR, HZ);
+#endif
 	}
 }
 
