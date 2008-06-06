@@ -510,7 +510,7 @@ static void krping_setup_wr(struct krping_cb *cb)
 		cb->fastreg_wr.wr.fast_reg.page_list_len = cb->page_list_len;
 
 		cb->invalidate_wr.next = &cb->fastreg_wr;
-		cb->invalidate_wr.opcode = IB_WR_INVALIDATE_MR;
+		cb->invalidate_wr.opcode = IB_WR_LOCAL_INV;
 	}
 
 }
@@ -805,7 +805,7 @@ static void krping_format_send(struct krping_cb *cb, u64 buf,
 	if (!cb->server && cb->mem == FASTREG) {
 
 		mr = cb->fastreg_mr;
-		cb->invalidate_wr.wr.local_inv.rkey = mr->rkey;
+		cb->invalidate_wr.ex.invalidate_rkey = mr->rkey;
 
 		/*
 		 * Update the fastreg key.  Use jiffies to get a new 8b value.
