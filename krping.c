@@ -1433,6 +1433,27 @@ static void krping_bw_test_server(struct krping_cb *cb)
 	wait_event_interruptible(cb->sem, cb->state == ERROR);
 }
 
+static int fastreg_supported(struct ib_device *dev)
+{
+	struct ib_device_attr attr;
+	int ret;
+
+	ret = ib_query_device(dev, &attr);
+	if (ret) {
+		printk(KERN_ERR PFX "ib_query_device failed ret %d\n", ret);
+		return 0;
+	}
+	if (!(attr.device_cap_flags & IB_DEVICE_MEM_MGT_EXTENSIONS)) {
+		printk(KERN_ERR PFX 
+			"Fastreg not supported - device_cap_flags 0x%x\n",
+			attr.device_cap_flags);
+		return 0;
+	}
+	DEBUG_LOG("Fastreg supported - device_cap_flags 0x%x\n",
+		attr.device_cap_flags);
+	return 1;
+}
+
 static int krping_bind_server(struct krping_cb *cb)
 {
 	struct sockaddr_in sin;
@@ -1463,6 +1484,9 @@ static int krping_bind_server(struct krping_cb *cb)
 			cb->state);
 		return -1;
 	}
+
+	if (cb->mem == FASTREG && !fastreg_supported(cb->child_cm_id->device))
+		return -EINVAL;
 
 	return 0;
 }
@@ -1807,6 +1831,9 @@ static int krping_bind_client(struct krping_cb *cb)
 		       cb->state);
 		return -EINTR;
 	}
+
+	if (cb->mem == FASTREG && !fastreg_supported(cb->cm_id->device))
+		return -EINVAL;
 
 	DEBUG_LOG("rdma_resolve_addr - rdma_resolve_route successful\n");
 	return 0;
