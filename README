@@ -1,5 +1,5 @@
 		Kernel Mode RDMA Ping Module
-		   Steve Wise - 5/2007
+		   Steve Wise - 6/2008
 
 ============
 Introduction
@@ -19,11 +19,11 @@ recv, rdma read, rdma write, and completion notifications.
 
 - IP addressing used to identify remote peer.
 
-- Transport independent utilizing the new RDMA CMA service
+- Transport independent utilizing the RDMA CMA service
 
 - No user-space application needed.
 
-- Just a test utility.
+- Just a test utility...nothing more.
 
 This module allows establishing connections and running ping/pong tests
 via a /proc entry called /proc/krping.  This simple mechanism allows
@@ -37,7 +37,7 @@ is established, the client and server begin a ping/pong loop:
 
 Client				Server
 ---------------------------------------------------------------------
-SEND(ping source rkey/addr/len)
+SEND(ping source buffer rkey/addr/len)
 
 				RECV Completion with ping source info
 				RDMA READ from client source MR
@@ -45,7 +45,7 @@ SEND(ping source rkey/addr/len)
 				SEND .go ahead. to client
 
 RECV Completion of .go ahead.
-SEND (ping sink rkey/addr/len)	
+SEND (ping sink buffer rkey/addr/len)	
 
 				RECV Completion with ping sink info
 				RDMA Write to client sink MR
@@ -53,7 +53,7 @@ SEND (ping sink rkey/addr/len)
 				SEND .go ahead. to client
 
 RECV Completion of .go ahead.
-Validate data
+Validate data in source and sink buffers
 
 <repeat the above loop>
 
@@ -64,12 +64,14 @@ To build/install the krping module
 
 # git clone git://git.openfabrics.org/~swise/krping
 # cd krping
+<edit Makefile and set KSRC accordingly>
 # make && make install
 # modprobe rdma_krping
 
 ============
 Using Krping
 ============
+
 Communication from user space is done via the /proc filesystem.
 Krping exports file /proc/krping.  Writing commands in ascii format to
 /proc/krping will start krping threads in the kernel.  The thread issuing
@@ -85,7 +87,7 @@ IPoverIB devices are configured on the 192.168.69/24 subnet accordingly.
 Server:
 
 # modprobe rdma_krping
-# echo "server,test=rping,addr=192.168.69.127,port=9999" >/proc/krping
+# echo "server,addr=192.168.69.127,port=9999" >/proc/krping
 
 
 The echo command above will block until the krping test completes,
@@ -94,33 +96,104 @@ or the user hits ctrl-c.
 On the client:
 
 # modprobe rdma_krping
-# echo "client,test=rping,addr=192.168.69.127,port=9999,count=100" >/proc/krping
+# echo "client,addr=192.168.69.127,port=9999,count=100" >/proc/krping
 
 Just like on the server, the echo command above will block until the
 krping test completes, or the user hits ctrl-c.
 
-The syntax for krping commands is a string of options separated by
-commas.  Options can be single keywords, or in the form: option=operand.
+The syntax for krping commands is a string of options separated by commas.
+Options can be single keywords, or in the form: option=operand.
 
 Operands can be integers or strings.
+
+Note you must specify the _same_ options on both sides.  For instance,
+if you want to use the server_invalidate option, then you must specify
+it on both the server and client command lines.
 
 Opcode		Operand Type	Description
 ------------------------------------------------------------------------
 client		none		Initiate a client side krping thread.
 server		none		Initiate a server side krping thread.
-addr		string		The destination IP address in dotted 
-				decimal format.
-port		integer		The destination port number in host byte 
+addr		string		The server's IP address in dotted 
+				decimal format.  Note the server can
+				use 0.0.0.0 to bind to all devices.
+port		integer		The server's port number in host byte 
 				order.
 count		integer		The number of rping iterations to 
 				perform before shutting down the test.  
 				If unspecified, the count is infinite.
 size		integer		The size of the rping data.  Default for 
-				rping is 65 bytes and 64KB for fast.
+				rping is 65 bytes.
 verbose		none		Enables printk()s that dump the rping 
-				data.
-validate	none		Enables validating the rping data to 
-				detect data corruption.
+				data. Use with caution!
+validate	none		Enables validating the rping data on
+				each iteration to detect data 
+				corruption.
+mem_mode	string		Determines how memory will be 
+				registered.  Modes include mr, dma,
+				and fastreg.  Default is dma.
+server_invalidate none		Valid only in fastreg mode, this 
+				option enables invalidating the
+				client's fastreg mr via 
+				SEND_WITH_INVALIDATE messages from
+				the server.
+				
+============
+Memory Usage:
+============
+
+The krping client uses 4 memory areas:
+
+start_buf - the source of the ping data.  This buffer is advertised
+to the server each iteration, and the server rdma reads the ping data
+from this buffer over the wire.
+
+rdma_buf  - the sink of the ping data.  This buffer is advertised
+to the server each iteration, and the server rdma writes the ping data
+that it read from the start buffer into this buffer.
+
+recv_buf  - used to recv "go ahead" SEND from the server.  
+
+send_buf  - used to advertise the rdma buffers to the server via SEND
+messages.
+
+The krping cerver uses 3 memory areas:
+
+rdma_buf  - used as the sink of the RDMA READ to pull the ping data
+from the client, and then used as the source of an RDMA WRITE to
+push the ping data back to the client.
+
+recv_buf  - used to receive rdma rkey/addr/length advertisements from
+the client.
+
+send_buf  - used to send "go ahead" SEND messages to the client.
+
+
+============
+Memory Registration Modes:
+============
+
+Each of these memory areas are registered with the RDMA device using
+whatever memory mode was specified in the command line. The mem_mode
+values include: mr, dma, and fastreg.  The default mode, if not specified,
+is dma.
+
+The mr mem_mode uses a standard memory region for each buffer.  It 
+is registered once at startup.
+
+The dma mem_mode uses a single dma_mr for all memory buffers.
+
+The fastreg mem_mode uses a fastreg mr on the client side for the
+start_buf and rdma_buf buffers.  Each time the client will advertise
+one of these buffers, it invalidates the previous registration and fast
+registers the new buffer with a new key.   If the server_invalidate
+option is on, then the server will do the invalidation via the "go ahead"
+messages using the IB_WR_SEND_WITH_INV opcode.   Otherwise the clien
+invalidates the mr using the IB_WR_LOCAL_INV work request.
+
+============
+Stats
+============
 
 While krping threads are executing, you can obtain statistics on the
 thread by reading from the /proc/krping file.  If you cat /proc/krping,
@@ -149,3 +222,29 @@ Here is an example of the server side output for 5 krping threads:
 4-mthca1 0 0 16 1 101658394624 1551184 0 0
 5-mthca1 0 0 16 1 100201922560 1528960 0 0
 #
+
+============
+EXPERIMENTAL
+============
+
+There are other options that enable micro benchmarks to measure
+the kernel rdma performance.  These include:
+
+Opcode		Operand Type	Description
+------------------------------------------------------------------------
+wlat		none		Write latency test
+rlat		none		read latency test
+poll		none		enable polling vs blocking for rlat
+bw		none		write throughput test
+duplex		none		valid only with bw, this
+				enables bidirectional mode
+tx-depth	none		set the sq depth for bw tests
+
+
+See the awkit* files to take the data logged in the kernel log
+and compute RTT/2 or Gbps results.
+
+Use these at your own risk.
+
+
+END-OF-FILE
