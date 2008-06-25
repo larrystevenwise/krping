@@ -468,19 +468,27 @@ static void krping_setup_wr(struct krping_cb *cb)
 {
 	cb->recv_sgl.addr = cb->recv_dma_addr;
 	cb->recv_sgl.length = sizeof cb->recv_buf;
+#ifdef USE_ZERO_STAG
+	cb->recv_sgl.lkey = 0;
+#else
 	if (cb->mem == DMA)
 		cb->recv_sgl.lkey = cb->dma_mr->lkey;
 	else
 		cb->recv_sgl.lkey = cb->recv_mr->lkey;
+#endif
 	cb->rq_wr.sg_list = &cb->recv_sgl;
 	cb->rq_wr.num_sge = 1;
 
 	cb->send_sgl.addr = cb->send_dma_addr;
 	cb->send_sgl.length = sizeof cb->send_buf;
+#ifdef USE_ZERO_STAG
+	cb->send_sgl.lkey = 0;
+#else
 	if (cb->mem == DMA)
 		cb->send_sgl.lkey = cb->dma_mr->lkey;
 	else
 		cb->send_sgl.lkey = cb->send_mr->lkey;
+#endif
 
 	cb->sq_wr.opcode = IB_WR_SEND;
 	cb->sq_wr.send_flags = IB_SEND_SIGNALED;
