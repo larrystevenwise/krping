@@ -882,7 +882,12 @@ static void krping_test_server(struct krping_cb *cb)
 		cb->rdma_sq_wr.wr.rdma.rkey = cb->remote_rkey;
 		cb->rdma_sq_wr.wr.rdma.remote_addr = cb->remote_addr;
 		cb->rdma_sq_wr.sg_list->length = cb->remote_len;
-
+#ifdef USE_ZERO_STAG
+		if (cb->mem == DMA)
+			cb->rdma_sgl.lkey = cb->dma_mr->lkey;
+		else
+			cb->rdma_sgl.lkey = cb->rdma_mr->lkey;
+#endif
 		ret = ib_post_send(cb->qp, &cb->rdma_sq_wr, &bad_wr);
 		if (ret) {
 			printk(KERN_ERR PFX "post send error %d\n", ret);
@@ -934,6 +939,9 @@ static void krping_test_server(struct krping_cb *cb)
 		cb->rdma_sq_wr.wr.rdma.rkey = cb->remote_rkey;
 		cb->rdma_sq_wr.wr.rdma.remote_addr = cb->remote_addr;
 		cb->rdma_sq_wr.sg_list->length = strlen(cb->rdma_buf) + 1;
+#ifdef USE_ZERO_STAG
+		cb->rdma_sgl.lkey = 0;
+#endif
 		DEBUG_LOG("rdma write from lkey %x laddr %llx len %d\n",
 			  cb->rdma_sq_wr.sg_list->lkey,
 			  (unsigned long long)cb->rdma_sq_wr.sg_list->addr,
@@ -1907,6 +1915,7 @@ int krping_doit(char *cmd)
 	cb->state = IDLE;
 	cb->size = 64;
 	cb->txdepth = RPING_SQ_DEPTH;
+	cb->mem = DMA;
 	init_waitqueue_head(&cb->sem);
 
 	while ((op = krping_getopt("krping", &cmd, krping_opts, NULL, &optarg,
