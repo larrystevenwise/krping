@@ -137,6 +137,8 @@ server_invalidate none		Valid only in fastreg mode, this
 				client's fastreg mr via 
 				SEND_WITH_INVALIDATE messages from
 				the server.
+stag0		none		Use lkey 0 for source of writes and
+				sends, and in recvs
 				
 ============
 Memory Usage:
