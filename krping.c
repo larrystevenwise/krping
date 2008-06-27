@@ -89,6 +89,7 @@ static const struct krping_option krping_opts[] = {
  	{"duplex", OPT_NOPARAM, 'd'},
  	{"txdepth", OPT_INT, 'T'},
  	{"poll", OPT_NOPARAM, 'P'},
+ 	{"stag0", OPT_NOPARAM, 'Z'},
 	{NULL, 0, 0}
 };
 
@@ -232,6 +233,7 @@ struct krping_cb {
 	int duplex;			/* run bw full duplex test */
 	int poll;			/* poll or block for rlat test */
 	int txdepth;			/* SQ depth */
+	int stag0;			/* use 0 for lkey */
 
 	/* CM stuff */
 	struct rdma_cm_id *cm_id;	/* connection on client side,*/
@@ -468,27 +470,27 @@ static void krping_setup_wr(struct krping_cb *cb)
 {
 	cb->recv_sgl.addr = cb->recv_dma_addr;
 	cb->recv_sgl.length = sizeof cb->recv_buf;
-#ifdef USE_ZERO_STAG
-	cb->recv_sgl.lkey = 0;
-#else
-	if (cb->mem == DMA)
-		cb->recv_sgl.lkey = cb->dma_mr->lkey;
-	else
-		cb->recv_sgl.lkey = cb->recv_mr->lkey;
-#endif
+	if (cb->stag0)
+		cb->recv_sgl.lkey = 0;
+	else 
+		if (cb->mem == DMA)
+			cb->recv_sgl.lkey = cb->dma_mr->lkey;
+		else
+			cb->recv_sgl.lkey = cb->recv_mr->lkey;
 	cb->rq_wr.sg_list = &cb->recv_sgl;
 	cb->rq_wr.num_sge = 1;
 
 	cb->send_sgl.addr = cb->send_dma_addr;
 	cb->send_sgl.length = sizeof cb->send_buf;
-#ifdef USE_ZERO_STAG
-	cb->send_sgl.lkey = 0;
-#else
-	if (cb->mem == DMA)
-		cb->send_sgl.lkey = cb->dma_mr->lkey;
+#if 0
+	if (cb->stag0)
+		cb->send_sgl.lkey = 0;
 	else
-		cb->send_sgl.lkey = cb->send_mr->lkey;
 #endif
+		if (cb->mem == DMA)
+			cb->send_sgl.lkey = cb->dma_mr->lkey;
+		else
+			cb->send_sgl.lkey = cb->send_mr->lkey;
 
 	cb->sq_wr.opcode = IB_WR_SEND;
 	cb->sq_wr.send_flags = IB_SEND_SIGNALED;
@@ -890,12 +892,10 @@ static void krping_test_server(struct krping_cb *cb)
 		cb->rdma_sq_wr.wr.rdma.rkey = cb->remote_rkey;
 		cb->rdma_sq_wr.wr.rdma.remote_addr = cb->remote_addr;
 		cb->rdma_sq_wr.sg_list->length = cb->remote_len;
-#ifdef USE_ZERO_STAG
 		if (cb->mem == DMA)
 			cb->rdma_sgl.lkey = cb->dma_mr->lkey;
 		else
 			cb->rdma_sgl.lkey = cb->rdma_mr->lkey;
-#endif
 		ret = ib_post_send(cb->qp, &cb->rdma_sq_wr, &bad_wr);
 		if (ret) {
 			printk(KERN_ERR PFX "post send error %d\n", ret);
@@ -947,9 +947,8 @@ static void krping_test_server(struct krping_cb *cb)
 		cb->rdma_sq_wr.wr.rdma.rkey = cb->remote_rkey;
 		cb->rdma_sq_wr.wr.rdma.remote_addr = cb->remote_addr;
 		cb->rdma_sq_wr.sg_list->length = strlen(cb->rdma_buf) + 1;
-#ifdef USE_ZERO_STAG
-		cb->rdma_sgl.lkey = 0;
-#endif
+		if (cb->stag0)
+			cb->rdma_sgl.lkey = 0;
 		DEBUG_LOG("rdma write from lkey %x laddr %llx len %d\n",
 			  cb->rdma_sq_wr.sg_list->lkey,
 			  (unsigned long long)cb->rdma_sq_wr.sg_list->addr,
@@ -2015,6 +2014,10 @@ int krping_doit(char *cmd)
 		case 'T':
 			cb->txdepth = optint;
 			DEBUG_LOG("txdepth %d\n", (int) cb->txdepth);
+			break;
+		case 'Z':
+			cb->stag0 = 1;
+			DEBUG_LOG("using stag 0 for lkeys\n");
 			break;
 		default:
 			printk(KERN_ERR PFX "unknown opt %s\n", optarg);
