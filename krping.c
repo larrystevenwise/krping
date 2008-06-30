@@ -831,7 +831,6 @@ static void krping_format_send(struct krping_cb *cb, u64 buf,
 		else
 			cb->fastreg_wr.wr.fast_reg.access_flags = IB_ACCESS_REMOTE_WRITE;
 		cb->fastreg_wr.wr.fast_reg.iova_start = buf;
-		cb->fastreg_wr.wr.fast_reg.first_byte_offset = buf & ~PAGE_MASK;
 		p = (u64)(buf & PAGE_MASK);
 		for (i=0; i < cb->fastreg_wr.wr.fast_reg.page_list_len; 
 		     i++, p += PAGE_SIZE) {
@@ -840,12 +839,11 @@ static void krping_format_send(struct krping_cb *cb, u64 buf,
 		}
 
 		DEBUG_LOG(PFX "fastreg new rkey 0x%x shift %u len %u"
-			" iova_start %llx fbo 0x%x page_list_len %u\n",
+			" iova_start %llx page_list_len %u\n",
 			cb->fastreg_wr.wr.fast_reg.rkey,
 			cb->fastreg_wr.wr.fast_reg.page_shift,
 			cb->fastreg_wr.wr.fast_reg.length,
 			cb->fastreg_wr.wr.fast_reg.iova_start,
-			cb->fastreg_wr.wr.fast_reg.first_byte_offset,
 			cb->fastreg_wr.wr.fast_reg.page_list_len);
 
 		/* 
