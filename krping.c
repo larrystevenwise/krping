@@ -186,6 +186,9 @@ struct krping_cb {
 	struct ib_mr *fastreg_mr;
 	int server_invalidate;
 
+	struct ib_mw *mw;
+	struct ib_mw_bind bind_attr;
+
 	struct ib_recv_wr rq_wr;	/* recv work request record */
 	struct ib_sge recv_sgl;		/* recv single SGE */
 	struct krping_rdma_info recv_buf;/* malloc'd buffer */
@@ -472,25 +475,21 @@ static void krping_setup_wr(struct krping_cb *cb)
 	cb->recv_sgl.length = sizeof cb->recv_buf;
 	if (cb->stag0)
 		cb->recv_sgl.lkey = 0;
-	else 
-		if (cb->mem == DMA)
-			cb->recv_sgl.lkey = cb->dma_mr->lkey;
-		else
-			cb->recv_sgl.lkey = cb->recv_mr->lkey;
+	else if (cb->mem == DMA)
+		cb->recv_sgl.lkey = cb->dma_mr->lkey;
+	else
+		cb->recv_sgl.lkey = cb->recv_mr->lkey;
 	cb->rq_wr.sg_list = &cb->recv_sgl;
 	cb->rq_wr.num_sge = 1;
 
 	cb->send_sgl.addr = cb->send_dma_addr;
 	cb->send_sgl.length = sizeof cb->send_buf;
-#if 0
 	if (cb->stag0)
 		cb->send_sgl.lkey = 0;
+	else if (cb->mem == DMA)
+		cb->send_sgl.lkey = cb->dma_mr->lkey;
 	else
-#endif
-		if (cb->mem == DMA)
-			cb->send_sgl.lkey = cb->dma_mr->lkey;
-		else
-			cb->send_sgl.lkey = cb->send_mr->lkey;
+		cb->send_sgl.lkey = cb->send_mr->lkey;
 
 	cb->sq_wr.opcode = IB_WR_SEND;
 	cb->sq_wr.send_flags = IB_SEND_SIGNALED;
@@ -506,7 +505,8 @@ static void krping_setup_wr(struct krping_cb *cb)
 	cb->rdma_sq_wr.sg_list = &cb->rdma_sgl;
 	cb->rdma_sq_wr.num_sge = 1;
 
-	if (cb->mem == FASTREG) {
+	switch(cb->mem) {
+	case FASTREG:
 
 		/* 
 		 * A chain of 2 WRs, INVALDATE_MR + FAST_REG_MR.
@@ -521,8 +521,15 @@ static void krping_setup_wr(struct krping_cb *cb)
 
 		cb->invalidate_wr.next = &cb->fastreg_wr;
 		cb->invalidate_wr.opcode = IB_WR_LOCAL_INV;
+		break;
+	case MW:
+		cb->bind_attr.wr_id = 0xabbaabba;
+		cb->bind_attr.send_flags = 0; /* unsignaled */
+		cb->bind_attr.length = cb->size;
+		break;
+	default:
+		break;
 	}
-
 }
 
 static int krping_setup_buffers(struct krping_cb *cb)
@@ -548,7 +555,8 @@ static int krping_setup_buffers(struct krping_cb *cb)
 				           IB_ACCESS_REMOTE_WRITE);
 		if (IS_ERR(cb->dma_mr)) {
 			DEBUG_LOG(PFX "reg_dmamr failed\n");
-			return PTR_ERR(cb->dma_mr);
+			ret = PTR_ERR(cb->dma_mr);
+			goto bail;
 		}
 	} else {
 
@@ -563,7 +571,8 @@ static int krping_setup_buffers(struct krping_cb *cb)
 
 		if (IS_ERR(cb->recv_mr)) {
 			DEBUG_LOG(PFX "recv_buf reg_mr failed\n");
-			return PTR_ERR(cb->recv_mr);
+			ret = PTR_ERR(cb->recv_mr);
+			goto bail;
 		}
 
 		buf.addr = cb->send_dma_addr;
@@ -576,8 +585,8 @@ static int krping_setup_buffers(struct krping_cb *cb)
 
 		if (IS_ERR(cb->send_mr)) {
 			DEBUG_LOG(PFX "send_buf reg_mr failed\n");
-			ib_dereg_mr(cb->recv_mr);
-			return PTR_ERR(cb->send_mr);
+			ret = PTR_ERR(cb->send_mr);
+			goto bail;
 		}
 	}
 
@@ -585,7 +594,7 @@ static int krping_setup_buffers(struct krping_cb *cb)
 	if (!cb->rdma_buf) {
 		DEBUG_LOG(PFX "rdma_buf malloc failed\n");
 		ret = -ENOMEM;
-		goto err1;
+		goto bail;
 	}
 
 	cb->rdma_dma_addr = dma_map_single(cb->pd->device->dma_device, 
@@ -593,27 +602,59 @@ static int krping_setup_buffers(struct krping_cb *cb)
 			       DMA_BIDIRECTIONAL);
 	pci_unmap_addr_set(cb, rdma_mapping, cb->rdma_dma_addr);
 	if (cb->mem != DMA) {
-		if (cb->mem == FASTREG) {
-			cb->page_list_len = (((cb->size - 1) & PAGE_MASK) +
-				PAGE_SIZE) >> PAGE_SHIFT;
-			cb->page_list = ib_alloc_fast_reg_page_list(
-						cb->pd->device, 
-						cb->page_list_len);
-			if (IS_ERR(cb->page_list)) {
-				DEBUG_LOG(PFX "recv_buf reg_mr failed\n");
-				ret = PTR_ERR(cb->page_list);
-				goto err2;
+		if (!cb->server) {
+			switch (cb->mem) {
+			case FASTREG:
+				cb->page_list_len = (((cb->size - 1) & PAGE_MASK) +
+					PAGE_SIZE) >> PAGE_SHIFT;
+				cb->page_list = ib_alloc_fast_reg_page_list(
+							cb->pd->device, 
+							cb->page_list_len);
+				if (IS_ERR(cb->page_list)) {
+					DEBUG_LOG(PFX "recv_buf reg_mr failed\n");
+					ret = PTR_ERR(cb->page_list);
+					goto bail;
+				}
+				cb->fastreg_mr = ib_alloc_fast_reg_mr(cb->pd, 
+						cb->page_list->max_page_list_len);
+				if (IS_ERR(cb->fastreg_mr)) {
+					DEBUG_LOG(PFX "recv_buf reg_mr failed\n");
+					ret = PTR_ERR(cb->fastreg_mr);
+					goto bail;
+				}
+				DEBUG_LOG(PFX "fastreg rkey 0x%x page_list %p"
+					" page_list_len %u\n", cb->fastreg_mr->rkey, 
+					cb->page_list, cb->page_list_len);
+				break;
+			case MW:
+				cb->mw = ib_alloc_mw(cb->pd);
+				if (IS_ERR(cb->mw)) {
+					DEBUG_LOG(PFX "recv_buf alloc_mw failed\n");
+					ret = PTR_ERR(cb->mw);
+					goto bail;
+				}
+				/*FALLTHROUGH*/
+			case MR:
+				buf.addr = cb->rdma_dma_addr;
+				buf.size = cb->size;
+				DEBUG_LOG(PFX "rdma buf dma_addr %llx size %d\n", 
+					buf.addr, (int)buf.size);
+				iovbase = cb->rdma_dma_addr;
+				cb->rdma_mr = ib_reg_phys_mr(cb->pd, &buf, 1, 
+						     IB_ACCESS_REMOTE_READ| 
+						     IB_ACCESS_REMOTE_WRITE, 
+						     &iovbase);
+				if (IS_ERR(cb->rdma_mr)) {
+					DEBUG_LOG(PFX "rdma_buf reg_mr failed\n");
+					ret = PTR_ERR(cb->rdma_mr);
+					goto bail;
+				}
+				break;
+			default:
+				ret = -EINVAL;
+				goto bail;
+				break;
 			}
-			cb->fastreg_mr = ib_alloc_fast_reg_mr(cb->pd, 
-					cb->page_list->max_page_list_len);
-			if (IS_ERR(cb->fastreg_mr)) {
-				DEBUG_LOG(PFX "recv_buf reg_mr failed\n");
-				ret = PTR_ERR(cb->fastreg_mr);
-				goto err3;
-			}
-			DEBUG_LOG(PFX "fastreg rkey 0x%x page_list %p"
-				" page_list_len %u\n", cb->fastreg_mr->rkey, 
-				cb->page_list, cb->page_list_len);
 		}
 		buf.addr = cb->rdma_dma_addr;
 		buf.size = cb->size;
@@ -627,7 +668,7 @@ static int krping_setup_buffers(struct krping_cb *cb)
 		if (IS_ERR(cb->rdma_mr)) {
 			DEBUG_LOG(PFX "rdma_buf reg_mr failed\n");
 			ret = PTR_ERR(cb->rdma_mr);
-			goto err3;
+			goto bail;
 		}
 	}
 
@@ -637,7 +678,7 @@ static int krping_setup_buffers(struct krping_cb *cb)
 		if (!cb->start_buf) {
 			DEBUG_LOG(PFX "start_buf malloc failed\n");
 			ret = -ENOMEM;
-			goto err3;
+			goto bail;
 		}
 
 		cb->start_dma_addr = dma_map_single(cb->pd->device->dma_device, 
@@ -645,7 +686,7 @@ static int krping_setup_buffers(struct krping_cb *cb)
 						   DMA_BIDIRECTIONAL);
 		pci_unmap_addr_set(cb, start_mapping, cb->start_dma_addr);
 
-		if (cb->mem != DMA) {
+		if (cb->mem == MR || cb->mem == MW) {
 			unsigned flags = IB_ACCESS_REMOTE_READ;
 
 			if (cb->wlat || cb->rlat || cb->bw)
@@ -663,7 +704,7 @@ static int krping_setup_buffers(struct krping_cb *cb)
 			if (IS_ERR(cb->start_mr)) {
 				DEBUG_LOG(PFX "start_buf reg_mr failed\n");
 				ret = PTR_ERR(cb->start_mr);
-				goto err4;
+				goto bail;
 			}
 		}
 	}
@@ -671,22 +712,25 @@ static int krping_setup_buffers(struct krping_cb *cb)
 	krping_setup_wr(cb);
 	DEBUG_LOG(PFX "allocated & registered buffers...\n");
 	return 0;
-err4:
-	kfree(cb->start_buf);
-
-	if (cb->mem != DMA)
+bail:
+	if (cb->fastreg_mr && !IS_ERR(cb->fastreg_mr))
+		ib_dereg_mr(cb->fastreg_mr);
+	if (cb->mw && !IS_ERR(cb->mw))
+		ib_dealloc_mw(cb->mw);
+	if (cb->rdma_mr && !IS_ERR(cb->rdma_mr))
 		ib_dereg_mr(cb->rdma_mr);
-err3:
-	ib_free_fast_reg_page_list(cb->page_list);
-err2:
-	kfree(cb->rdma_buf);
-err1:
-	if (cb->mem == DMA)
+	if (cb->page_list && !IS_ERR(cb->page_list))
+		ib_free_fast_reg_page_list(cb->page_list);
+	if (cb->dma_mr && !IS_ERR(cb->dma_mr))
 		ib_dereg_mr(cb->dma_mr);
-	else {
+	if (cb->recv_mr && !IS_ERR(cb->recv_mr))
 		ib_dereg_mr(cb->recv_mr);
+	if (cb->send_mr && !IS_ERR(cb->send_mr))
 		ib_dereg_mr(cb->send_mr);
-	}
+	if (cb->rdma_buf)
+		kfree(cb->rdma_buf);
+	if (cb->start_buf)
+		kfree(cb->start_buf);
 	return ret;
 }
 
@@ -694,17 +738,20 @@ static void krping_free_buffers(struct krping_cb *cb)
 {
 	DEBUG_LOG("krping_free_buffers called on cb %p\n", cb);
 	
-	if (cb->mem == DMA)
+	if (cb->dma_mr)
 		ib_dereg_mr(cb->dma_mr);
-	else {
+	if (cb->send_mr)
 		ib_dereg_mr(cb->send_mr);
+	if (cb->recv_mr)
 		ib_dereg_mr(cb->recv_mr);
+	if (cb->rdma_mr)
 		ib_dereg_mr(cb->rdma_mr);
-		if (!cb->server)
-			ib_dereg_mr(cb->start_mr);
-		if (cb->mem == FASTREG)
-			ib_dereg_mr(cb->fastreg_mr);
-	}
+	if (cb->start_mr)
+		ib_dereg_mr(cb->start_mr);
+	if (cb->fastreg_mr)
+		ib_dereg_mr(cb->fastreg_mr);
+	if (cb->mw)
+		ib_dealloc_mw(cb->mw);
 
 	dma_unmap_single(cb->pd->device->dma_device,
 			 pci_unmap_addr(cb, recv_mapping),
@@ -716,7 +763,7 @@ static void krping_free_buffers(struct krping_cb *cb)
 			 pci_unmap_addr(cb, rdma_mapping),
 			 cb->size, DMA_BIDIRECTIONAL);
 	kfree(cb->rdma_buf);
-	if (!cb->server || cb->wlat || cb->rlat || cb->bw) {
+	if (cb->start_buf) {
 		dma_unmap_single(cb->pd->device->dma_device,
 			 pci_unmap_addr(cb, start_mapping),
 			 cb->size, DMA_BIDIRECTIONAL);
@@ -812,53 +859,72 @@ static void krping_format_send(struct krping_cb *cb, u64 buf,
 	 * For fastreg mode, invalidate the old rkey, set a new key value
 	 * and fastreg the new rkey.
 	 */
-	if (!cb->server && cb->mem == FASTREG) {
+	if (!cb->server) {
+		switch (cb->mem) {
+		case FASTREG:
+			mr = cb->fastreg_mr;
+			cb->invalidate_wr.ex.invalidate_rkey = mr->rkey;
 
-		mr = cb->fastreg_mr;
-		cb->invalidate_wr.ex.invalidate_rkey = mr->rkey;
+			/*
+			 * Update the fastreg key.  Use jiffies to get a new 8b value.
+			 */
+			ib_update_fast_reg_key(mr, (u8)jiffies);
+			cb->fastreg_wr.wr.fast_reg.rkey = mr->rkey;
 
-		/*
-		 * Update the fastreg key.  Use jiffies to get a new 8b value.
-		 */
-		ib_update_fast_reg_key(mr, (u8)jiffies);
-		cb->fastreg_wr.wr.fast_reg.rkey = mr->rkey;
+			/*
+			 * Update the fastreg WR with new buf info.
+			 */
+			if (buf == (u64)cb->start_dma_addr)
+				cb->fastreg_wr.wr.fast_reg.access_flags = IB_ACCESS_REMOTE_READ;
+			else
+				cb->fastreg_wr.wr.fast_reg.access_flags = IB_ACCESS_REMOTE_WRITE;
+			cb->fastreg_wr.wr.fast_reg.iova_start = buf;
+			p = (u64)(buf & PAGE_MASK);
+			for (i=0; i < cb->fastreg_wr.wr.fast_reg.page_list_len; 
+			     i++, p += PAGE_SIZE) {
+				cb->page_list->page_list[i] = p;
+				DEBUG_LOG(PFX "page_list[%d] 0x%llx\n", i, p);
+			}
 
-		/*
-		 * Update the fastreg WR with new buf info.
-		 */
-		if (buf == (u64)cb->start_dma_addr)
-			cb->fastreg_wr.wr.fast_reg.access_flags = IB_ACCESS_REMOTE_READ;
-		else
-			cb->fastreg_wr.wr.fast_reg.access_flags = IB_ACCESS_REMOTE_WRITE;
-		cb->fastreg_wr.wr.fast_reg.iova_start = buf;
-		p = (u64)(buf & PAGE_MASK);
-		for (i=0; i < cb->fastreg_wr.wr.fast_reg.page_list_len; 
-		     i++, p += PAGE_SIZE) {
-			cb->page_list->page_list[i] = p;
-			DEBUG_LOG(PFX "page_list[%d] 0x%llx\n", i, p);
-		}
+			DEBUG_LOG(PFX "fastreg new rkey 0x%x shift %u len %u"
+				" iova_start %llx page_list_len %u\n",
+				cb->fastreg_wr.wr.fast_reg.rkey,
+				cb->fastreg_wr.wr.fast_reg.page_shift,
+				cb->fastreg_wr.wr.fast_reg.length,
+				cb->fastreg_wr.wr.fast_reg.iova_start,
+				cb->fastreg_wr.wr.fast_reg.page_list_len);
 
-		DEBUG_LOG(PFX "fastreg new rkey 0x%x shift %u len %u"
-			" iova_start %llx page_list_len %u\n",
-			cb->fastreg_wr.wr.fast_reg.rkey,
-			cb->fastreg_wr.wr.fast_reg.page_shift,
-			cb->fastreg_wr.wr.fast_reg.length,
-			cb->fastreg_wr.wr.fast_reg.iova_start,
-			cb->fastreg_wr.wr.fast_reg.page_list_len);
-
-		/* 
-		 * If the server is invalidating out stags, then
-		 * post just the fastreg, otherwise post the 
-		 * invalidate+fastreg.
-		 */
-		if (cb->server_invalidate)
-			ret = ib_post_send(cb->qp, &cb->fastreg_wr, &bad_wr);
-		else
-			ret = ib_post_send(cb->qp, &cb->invalidate_wr, &bad_wr);
-		if (ret) {
-			printk(KERN_ERR PFX "post send error %d\n", ret);
-			cb->state = ERROR;
-			return;
+			/* 
+			 * If the server is invalidating out stags, then
+			 * post just the fastreg, otherwise post the 
+			 * invalidate+fastreg.
+			 */
+			if (cb->server_invalidate)
+				ret = ib_post_send(cb->qp, &cb->fastreg_wr, &bad_wr);
+			else
+				ret = ib_post_send(cb->qp, &cb->invalidate_wr, &bad_wr);
+			if (ret) {
+				printk(KERN_ERR PFX "post send error %d\n", ret);
+				cb->state = ERROR;
+				return;
+			}
+			break;
+		case MW:
+			/*
+			 * Update the MW with new buf info.
+			 */
+			if (buf == (u64)cb->start_dma_addr) {
+				cb->bind_attr.mw_access_flags = IB_ACCESS_REMOTE_READ;
+				cb->bind_attr.mr = cb->start_mr;
+			} else {
+				cb->bind_attr.mw_access_flags = IB_ACCESS_REMOTE_WRITE;
+				cb->bind_attr.mr = cb->rdma_mr;
+			}
+			cb->bind_attr.addr = buf;
+			ret = ib_bind_mw(cb->qp, cb->mw, &cb->bind_attr);
+			break;
+		default:
+			break;
 		}
 	}
 	info->buf = htonll(buf);
@@ -1992,10 +2058,8 @@ int krping_doit(char *cmd)
 				cb->mem = DMA;
 			else if (!strncmp(optarg, "fastreg", 7))
 				cb->mem = FASTREG;
-#ifdef notyet
 			else if (!strncmp(optarg, "mw", 2))
 				cb->mem = MW;
-#endif
 			else if (!strncmp(optarg, "mr", 2))
 				cb->mem = MR;
 			else {
