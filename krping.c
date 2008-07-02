@@ -82,7 +82,7 @@ static const struct krping_option krping_opts[] = {
 	{"server", OPT_NOPARAM, 's'},
 	{"client", OPT_NOPARAM, 'c'},
 	{"mem_mode", OPT_STRING, 'm'},
-	{"server_invalidate", OPT_NOPARAM, 'I'},
+	{"server_inv", OPT_NOPARAM, 'I'},
  	{"wlat", OPT_NOPARAM, 'l'},
  	{"rlat", OPT_NOPARAM, 'L'},
  	{"bw", OPT_NOPARAM, 'B'},
@@ -90,7 +90,7 @@ static const struct krping_option krping_opts[] = {
  	{"txdepth", OPT_INT, 'T'},
  	{"poll", OPT_NOPARAM, 'P'},
  	{"stag0", OPT_NOPARAM, 'Z'},
- 	{"read-inv", OPT_NOPARAM, 'R'},
+ 	{"read_inv", OPT_NOPARAM, 'R'},
 	{NULL, 0, 0}
 };
 
