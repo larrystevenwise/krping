@@ -132,13 +132,15 @@ validate	none		Enables validating the rping data on
 mem_mode	string		Determines how memory will be 
 				registered.  Modes include mr, dma,
 				and fastreg.  Default is dma.
-server_invalidate none		Valid only in fastreg mode, this 
+server_inv 	none		Valid only in fastreg mode, this 
 				option enables invalidating the
 				client's fastreg mr via 
 				SEND_WITH_INVALIDATE messages from
 				the server.
 stag0		none		Use lkey 0 for source of writes and
 				sends, and in recvs
+read_inv	none		Server will use READ_WITH_INV. Only
+				valid in fastreg mem_mode.
 				
 ============
 Memory Usage:
@@ -146,20 +148,21 @@ Memory Usage:
 
 The krping client uses 4 memory areas:
 
-start_buf - the source of the ping data.  This buffer is advertised
-to the server each iteration, and the server rdma reads the ping data
-from this buffer over the wire.
+start_buf - the source of the ping data.  This buffer is advertised to
+the server at the start of each iteration, and the server rdma reads
+the ping data from this buffer over the wire.
 
-rdma_buf  - the sink of the ping data.  This buffer is advertised
-to the server each iteration, and the server rdma writes the ping data
-that it read from the start buffer into this buffer.
+rdma_buf  - the sink of the ping data.  This buffer is advertised to the
+server each iteration, and the server rdma writes the ping data that it
+read from the start buffer into this buffer.  The start_buf and rdma_buf
+contents are then compared if the krping validate option is specified.
 
 recv_buf  - used to recv "go ahead" SEND from the server.  
 
 send_buf  - used to advertise the rdma buffers to the server via SEND
 messages.
 
-The krping cerver uses 3 memory areas:
+The krping server uses 3 memory areas:
 
 rdma_buf  - used as the sink of the RDMA READ to pull the ping data
 from the client, and then used as the source of an RDMA WRITE to
@@ -190,8 +193,16 @@ start_buf and rdma_buf buffers.  Each time the client will advertise
 one of these buffers, it invalidates the previous registration and fast
 registers the new buffer with a new key.   If the server_invalidate
 option is on, then the server will do the invalidation via the "go ahead"
-messages using the IB_WR_SEND_WITH_INV opcode.   Otherwise the clien
+messages using the IB_WR_SEND_WITH_INV opcode.   Otherwise the client
 invalidates the mr using the IB_WR_LOCAL_INV work request.
+
+On the server side, fastreg mem_mode causes the server to use the
+fast_reg_mr rkey for its rdma_buf buffer IO.  Before each rdma read and
+rdma write, the server will post an IB_WR_LOCAL_INV + IB_WR_FAST_REG_MR
+WR chain to register the buffer with a new key.  If the krping read-inv
+option is set then the server will use IB_WR_READ_WITH_INV to do the
+rdma read and skip the IB_WR_LOCAL_INV wr before re-registering the
+buffer for the subsequent rdma write operation.
 
 ============
 Stats
