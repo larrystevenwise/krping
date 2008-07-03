@@ -905,7 +905,10 @@ static u32 krping_rdma_rkey(struct krping_cb *cb, u64 buf, int post_inv)
 		rkey = cb->mw->rkey;
 		break;
 	case MR:
-		rkey = cb->rdma_mr->rkey;
+		if (buf == (u64)cb->start_dma_addr)
+			rkey = cb->start_mr->rkey;
+		else
+			rkey = cb->rdma_mr->rkey;
 		break;
 	case DMA:
 		rkey = cb->dma_mr->rkey;
