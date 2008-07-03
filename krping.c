@@ -633,12 +633,11 @@ static int krping_setup_buffers(struct krping_cb *cb)
 				ret = PTR_ERR(cb->mw);
 				goto bail;
 			}
+			DEBUG_LOG(PFX "mw rkey 0x%x\n", cb->mw->rkey);
 			/*FALLTHROUGH*/
 		case MR:
 			buf.addr = cb->rdma_dma_addr;
 			buf.size = cb->size;
-			DEBUG_LOG(PFX "rdma buf dma_addr %llx size %d\n", 
-				buf.addr, (int)buf.size);
 			iovbase = cb->rdma_dma_addr;
 			cb->rdma_mr = ib_reg_phys_mr(cb->pd, &buf, 1, 
 					     IB_ACCESS_REMOTE_READ| 
@@ -649,6 +648,8 @@ static int krping_setup_buffers(struct krping_cb *cb)
 				ret = PTR_ERR(cb->rdma_mr);
 				goto bail;
 			}
+			DEBUG_LOG(PFX "rdma buf dma_addr %llx size %d mr rkey 0x%x\n", 
+				buf.addr, (int)buf.size, cb->rdma_mr->rkey);
 			break;
 		default:
 			ret = -EINVAL;
@@ -901,8 +902,14 @@ static u32 krping_rdma_rkey(struct krping_cb *cb, u64 buf, int post_inv)
 			cb->bind_attr.mr = cb->rdma_mr;
 		}
 		cb->bind_attr.addr = buf;
+		DEBUG_LOG(PFX "binding mw rkey 0x%x to buf %llx mr rkey 0x%x\n",
+			cb->mw->rkey, buf, cb->bind_attr.mr->rkey);
 		ret = ib_bind_mw(cb->qp, cb->mw, &cb->bind_attr);
-		rkey = cb->mw->rkey;
+		if (ret) {
+			printk(KERN_ERR PFX "bind mw error %d\n", ret);
+			cb->state = ERROR;
+		} else
+			rkey = cb->mw->rkey;
 		break;
 	case MR:
 		if (buf == (u64)cb->start_dma_addr)
