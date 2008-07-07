@@ -6,14 +6,15 @@ KOBJ=/lib/modules/`uname -r`/build
 # configure the ofa_kernel-1.3 tree with the options from 
 # /etc/infiniband/info
 #
-OFA=/usr/src/ofa_kernel-1.3
+#OFA=/usr/src/ofa_kernel-1.3
 #
 # Use this if you're building against a kernel.org kernel with
 # rdma support enabled.
 # 
 #OFA=$(KSRC)
+OFA=$(KOBJ)
 EXTRA_CFLAGS += -DLINUX -D__KERNEL__ -DMODULE -O2 -pipe -Wall
-EXTRA_CFLAGS += -I$(OFA)/include -I$(KSRC)/include -I.
+EXTRA_CFLAGS += -I$(OFA)/include -I$(KOBJ)/include -I$(KOBJ)/include2 -I$(KSRC)/include -I.
 EXTRA_CFLAGS += $(shell [ -f $(KSRC)/include/linux/modversions.h ] && \
             echo "-DMODVERSIONS -DEXPORT_SYMTAB \
                   -include $(KSRC)/include/linux/modversions.h")
