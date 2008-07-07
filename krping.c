@@ -1589,7 +1589,7 @@ static void krping_run_server(struct krping_cb *cb)
 	ret = krping_setup_qp(cb, cb->child_cm_id);
 	if (ret) {
 		printk(KERN_ERR PFX "setup_qp failed: %d\n", ret);
-		return;
+		goto err0;
 	}
 
 	ret = krping_setup_buffers(cb);
@@ -1619,11 +1619,12 @@ static void krping_run_server(struct krping_cb *cb)
 	else
 		krping_test_server(cb);
 	rdma_disconnect(cb->child_cm_id);
-	rdma_destroy_id(cb->child_cm_id);
 err2:
 	krping_free_buffers(cb);
 err1:
 	krping_free_qp(cb);
+err0:
+	rdma_destroy_id(cb->child_cm_id);
 }
 
 static void krping_test_client(struct krping_cb *cb)
