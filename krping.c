@@ -949,7 +949,7 @@ static void krping_format_send(struct krping_cb *cb, u64 buf)
 
 static void krping_test_server(struct krping_cb *cb)
 {
-	struct ib_send_wr *bad_wr;
+	struct ib_send_wr *bad_wr, inv;
 	int ret;
 
 	while (1) {
@@ -963,21 +963,37 @@ static void krping_test_server(struct krping_cb *cb)
 
 		DEBUG_LOG("server received sink adv\n");
 
-		/* Issue RDMA Read. */
-		if (cb->read_inv)
-			cb->rdma_sq_wr.opcode = IB_WR_RDMA_READ_WITH_INV;
-		else
-			cb->rdma_sq_wr.opcode = IB_WR_RDMA_READ;
 		cb->rdma_sq_wr.wr.rdma.rkey = cb->remote_rkey;
 		cb->rdma_sq_wr.wr.rdma.remote_addr = cb->remote_addr;
 		cb->rdma_sq_wr.sg_list->length = cb->remote_len;
 		cb->rdma_sgl.lkey = krping_rdma_rkey(cb, cb->rdma_dma_addr, 1);
+
+		/* Issue RDMA Read. */
+		if (cb->read_inv)
+			cb->rdma_sq_wr.opcode = IB_WR_RDMA_READ_WITH_INV;
+		else {
+
+			cb->rdma_sq_wr.opcode = IB_WR_RDMA_READ;
+			if (cb->mem == FASTREG) {
+				/* 
+				 * Immediately follow the read with a 
+				 * fenced LOCAL_INV.
+				 */
+				cb->rdma_sq_wr.next = &inv;
+				memset(&inv, 0, sizeof inv);
+				inv.opcode = IB_WR_LOCAL_INV;
+				inv.ex.invalidate_rkey = cb->fastreg_mr->rkey;
+				inv.send_flags = IB_SEND_FENCE;
+			}
+		}
 
 		ret = ib_post_send(cb->qp, &cb->rdma_sq_wr, &bad_wr);
 		if (ret) {
 			printk(KERN_ERR PFX "post send error %d\n", ret);
 			break;
 		}
+		cb->rdma_sq_wr.next = NULL;
+
 		DEBUG_LOG("server posted rdma read req \n");
 
 		/* Wait for read completion */
@@ -1027,7 +1043,7 @@ static void krping_test_server(struct krping_cb *cb)
 		if (cb->stag0)
 			cb->rdma_sgl.lkey = 0;
 		else 
-			cb->rdma_sgl.lkey = krping_rdma_rkey(cb, cb->rdma_dma_addr, !cb->read_inv);
+			cb->rdma_sgl.lkey = krping_rdma_rkey(cb, cb->rdma_dma_addr, 0);
 			
 		DEBUG_LOG("rdma write from lkey %x laddr %llx len %d\n",
 			  cb->rdma_sq_wr.sg_list->lkey,
