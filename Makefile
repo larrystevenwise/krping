@@ -6,13 +6,13 @@ KOBJ=/lib/modules/`uname -r`/build
 # configure the ofa_kernel-1.3 tree with the options from 
 # /etc/infiniband/info
 #
-#OFA=/usr/src/ofa_kernel-1.3
+OFA=/usr/src/ofa_kernel-1.4.1
 #
 # Use this if you're building against a kernel.org kernel with
 # rdma support enabled.
 # 
 #OFA=$(KSRC)
-OFA=$(KOBJ)
+#OFA=$(KOBJ)
 
 #
 # Set ARCH to x86 for both i386 and x86_64
@@ -20,10 +20,10 @@ OFA=$(KOBJ)
 ARCH=x86
 EXTRA_CFLAGS += -DLINUX -D__KERNEL__ -DMODULE -O2 -pipe -Wall
 EXTRA_CFLAGS += -I$(OFA)/arch/$(ARCH)/include -I$(OFA)/include -I$(KOBJ)/include -I$(KOBJ)/include2 -I$(KSRC)/include -I.
-EXTRA_CFLAGS += $(shell [ -f $(KSRC)/include/linux/modversions.h ] && \
+EXTRA_CFLAGS += $(shell [ -f $(KOBJ)/include/linux/modversions.h ] && \
             echo "-DMODVERSIONS -DEXPORT_SYMTAB \
                   -include $(KSRC)/include/linux/modversions.h")
-EXTRA_CFLAGS += $(shell [ -f $(KSRC)/include/config/modversions.h ] && \
+EXTRA_CFLAGS += $(shell [ -f $(KOBJ)/include/config/modversions.h ] && \
             echo "-DMODVERSIONS -DEXPORT_SYMTAB \
                   -include $(KSRC)/include/config/modversions.h")
 
@@ -31,9 +31,12 @@ obj-m += rdma_krping.o
 rdma_krping-y			:= getopt.o krping.o
 
 default:
-	make -C $(KSRC) O=$(KOBJ) SUBDIRS=$(shell pwd) LINUXINCLUDE=' -I$(OFA)/include -Iinclude -include include/linux/autoconf.h -include $(OFA)/include/linux/autoconf.h' modules
+	cp -f $(OFA)/Module.markers `pwd`
+	cp -f $(OFA)/Module.symvers `pwd`
+	make -C $(KSRC) O=$(KOBJ) SUBDIRS=$(shell pwd) LINUXINCLUDE='-I$(OFA)/include -Iinclude -include $(KOBJ)/include/linux/autoconf.h -include linux/autoconf.h' modules
+
 install:
-	make -C $(KSRC) O=$(KOBJ) SUBDIRS=$(shell pwd) LINUXINCLUDE=' -I$(OFA)/include -Iinclude -include include/linux/autoconf.h -include $(OFA)/include/linux/autoconf.h' modules_install
+	make -C $(KSRC) O=$(KOBJ) SUBDIRS=$(shell pwd) modules_install
 	depmod -a
 
 clean:
@@ -41,3 +44,4 @@ clean:
 	rm -f *.ko
 	rm -f rdma_krping.mod.c
 	rm -f Module.symvers
+	rm -f Module.markers
