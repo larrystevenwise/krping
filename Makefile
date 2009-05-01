@@ -6,7 +6,7 @@ KOBJ=/lib/modules/`uname -r`/build
 # configure the ofa_kernel-1.3 tree with the options from 
 # /etc/infiniband/info
 #
-OFA=/usr/src/ofa_kernel-1.4.1
+OFA=/usr/src/ofa_kernel
 #
 # Use this if you're building against a kernel.org kernel with
 # rdma support enabled.
@@ -31,8 +31,8 @@ obj-m += rdma_krping.o
 rdma_krping-y			:= getopt.o krping.o
 
 default:
-	cp -f $(OFA)/Module.markers `pwd`
-	cp -f $(OFA)/Module.symvers `pwd`
+	-cp -f $(OFA)/Module.markers `pwd`
+	-cp -f $(OFA)/Module.symvers `pwd`
 	make -C $(KSRC) O=$(KOBJ) SUBDIRS=$(shell pwd) LINUXINCLUDE='-I$(OFA)/include -Iinclude -include $(KOBJ)/include/linux/autoconf.h -include linux/autoconf.h' modules
 
 install:
