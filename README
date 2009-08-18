@@ -1,5 +1,5 @@
 		Kernel Mode RDMA Ping Module
-		   Steve Wise - 6/2008
+		   Steve Wise - 8/2009
 
 ============
 Introduction
@@ -137,8 +137,8 @@ server_inv 	none		Valid only in fastreg mode, this
 				client's fastreg mr via 
 				SEND_WITH_INVALIDATE messages from
 				the server.
-stag0		none		Use lkey 0 for source of writes and
-				sends, and in recvs
+local_dma_lkey	none		Use the local dma lkey for the source 
+				of writes and sends, and in recvs
 read_inv	none		Server will use READ_WITH_INV. Only
 				valid in fastreg mem_mode.
 				

@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2005 Ammasso, Inc. All rights reserved.
- * Copyright (c) 2006 Open Grid Computing, Inc. All rights reserved.
+ * Copyright (c) 2006-2009 Open Grid Computing, Inc. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -89,7 +89,7 @@ static const struct krping_option krping_opts[] = {
  	{"duplex", OPT_NOPARAM, 'd'},
  	{"txdepth", OPT_INT, 'T'},
  	{"poll", OPT_NOPARAM, 'P'},
- 	{"stag0", OPT_NOPARAM, 'Z'},
+ 	{"local_dma_lkey", OPT_NOPARAM, 'Z'},
  	{"read_inv", OPT_NOPARAM, 'R'},
 	{NULL, 0, 0}
 };
@@ -239,11 +239,11 @@ struct krping_cb {
 	int duplex;			/* run bw full duplex test */
 	int poll;			/* poll or block for rlat test */
 	int txdepth;			/* SQ depth */
-	int stag0;			/* use 0 for lkey */
+	int local_dma_lkey;			/* use 0 for lkey */
 
 	/* CM stuff */
 	struct rdma_cm_id *cm_id;	/* connection on client side,*/
-					/* listener on service side. */
+					/* listener on server side. */
 	struct rdma_cm_id *child_cm_id;	/* connection on server side */
 	struct list_head list;	
 };
@@ -376,9 +376,9 @@ static void krping_cq_event_handler(struct ib_cq *cq, void *ctx)
 				DEBUG_LOG("cq flushed\n");
 				continue;
 			} else {
-				printk(KERN_ERR PFX 
-					"cq completion failed status %d\n",
-					wc.status);
+				printk(KERN_ERR PFX "cq completion failed with "
+				       "wr_id %x status %d opcode %d vender_err %x\n",
+					wc.wr_id, wc.status, wc.opcode, wc.vendor_err);
 				goto error;
 			}
 		}
@@ -429,8 +429,16 @@ static void krping_cq_event_handler(struct ib_cq *cq, void *ctx)
 			wake_up_interruptible(&cb->sem);
 			break;
 
+		case IB_WC_LOCAL_INV:
+		case IB_WC_FAST_REG_MR:
+			printk(KERN_ERR PFX
+			       "Unexpected opcode %d, most likely unsignalled\n",
+			       __func__, __LINE__, wc.opcode);
+			break;
 		default:
-			DEBUG_LOG("unknown!!!!! completion\n");
+			printk(KERN_ERR PFX
+			       "Unexpected opcode %d, Shutting down\n",
+			       __func__, __LINE__, wc.opcode);
 			goto error;
 		}
 	}
@@ -476,8 +484,8 @@ static void krping_setup_wr(struct krping_cb *cb)
 {
 	cb->recv_sgl.addr = cb->recv_dma_addr;
 	cb->recv_sgl.length = sizeof cb->recv_buf;
-	if (cb->stag0)
-		cb->recv_sgl.lkey = 0;
+	if (cb->local_dma_lkey)
+		cb->recv_sgl.lkey = cb->qp->device->local_dma_lkey;
 	else if (cb->mem == DMA)
 		cb->recv_sgl.lkey = cb->dma_mr->lkey;
 	else
@@ -487,8 +495,8 @@ static void krping_setup_wr(struct krping_cb *cb)
 
 	cb->send_sgl.addr = cb->send_dma_addr;
 	cb->send_sgl.length = sizeof cb->send_buf;
-	if (cb->stag0)
-		cb->send_sgl.lkey = 0;
+	if (cb->local_dma_lkey)
+		cb->send_sgl.lkey = cb->qp->device->local_dma_lkey;
 	else if (cb->mem == DMA)
 		cb->send_sgl.lkey = cb->dma_mr->lkey;
 	else
@@ -560,34 +568,35 @@ static int krping_setup_buffers(struct krping_cb *cb)
 			goto bail;
 		}
 	} else {
+		if (!cb->local_dma_lkey) {
+			buf.addr = cb->recv_dma_addr;
+			buf.size = sizeof cb->recv_buf;
+			DEBUG_LOG(PFX "recv buf dma_addr %llx size %d\n", buf.addr, 
+				(int)buf.size);
+			iovbase = cb->recv_dma_addr;
+			cb->recv_mr = ib_reg_phys_mr(cb->pd, &buf, 1, 
+						     IB_ACCESS_LOCAL_WRITE, 
+						     &iovbase);
 
-		buf.addr = cb->recv_dma_addr;
-		buf.size = sizeof cb->recv_buf;
-		DEBUG_LOG(PFX "recv buf dma_addr %llx size %d\n", buf.addr, 
-			(int)buf.size);
-		iovbase = cb->recv_dma_addr;
-		cb->recv_mr = ib_reg_phys_mr(cb->pd, &buf, 1, 
-					     IB_ACCESS_LOCAL_WRITE, 
-					     &iovbase);
+			if (IS_ERR(cb->recv_mr)) {
+				DEBUG_LOG(PFX "recv_buf reg_mr failed\n");
+				ret = PTR_ERR(cb->recv_mr);
+				goto bail;
+			}
 
-		if (IS_ERR(cb->recv_mr)) {
-			DEBUG_LOG(PFX "recv_buf reg_mr failed\n");
-			ret = PTR_ERR(cb->recv_mr);
-			goto bail;
-		}
+			buf.addr = cb->send_dma_addr;
+			buf.size = sizeof cb->send_buf;
+			DEBUG_LOG(PFX "send buf dma_addr %llx size %d\n", buf.addr, 
+				(int)buf.size);
+			iovbase = cb->send_dma_addr;
+			cb->send_mr = ib_reg_phys_mr(cb->pd, &buf, 1, 
+						     0, &iovbase);
 
-		buf.addr = cb->send_dma_addr;
-		buf.size = sizeof cb->send_buf;
-		DEBUG_LOG(PFX "send buf dma_addr %llx size %d\n", buf.addr, 
-			(int)buf.size);
-		iovbase = cb->send_dma_addr;
-		cb->send_mr = ib_reg_phys_mr(cb->pd, &buf, 1, 
-					     0, &iovbase);
-
-		if (IS_ERR(cb->send_mr)) {
-			DEBUG_LOG(PFX "send_buf reg_mr failed\n");
-			ret = PTR_ERR(cb->send_mr);
-			goto bail;
+			if (IS_ERR(cb->send_mr)) {
+				DEBUG_LOG(PFX "send_buf reg_mr failed\n");
+				ret = PTR_ERR(cb->send_mr);
+				goto bail;
+			}
 		}
 	}
 
@@ -921,6 +930,7 @@ static u32 krping_rdma_rkey(struct krping_cb *cb, u64 buf, int post_inv)
 		rkey = cb->dma_mr->rkey;
 		break;
 	default:
+		printk(KERN_ERR PFX "%s:%d case ERROR\n", __func__, __LINE__);
 		cb->state = ERROR;
 		break;
 	}
@@ -1040,8 +1050,8 @@ static void krping_test_server(struct krping_cb *cb)
 		cb->rdma_sq_wr.wr.rdma.rkey = cb->remote_rkey;
 		cb->rdma_sq_wr.wr.rdma.remote_addr = cb->remote_addr;
 		cb->rdma_sq_wr.sg_list->length = strlen(cb->rdma_buf) + 1;
-		if (cb->stag0)
-			cb->rdma_sgl.lkey = 0;
+		if (cb->local_dma_lkey)
+			cb->rdma_sgl.lkey = cb->qp->device->local_dma_lkey;
 		else 
 			cb->rdma_sgl.lkey = krping_rdma_rkey(cb, cb->rdma_dma_addr, 0);
 			
@@ -2087,8 +2097,8 @@ int krping_doit(char *cmd)
 			DEBUG_LOG("txdepth %d\n", (int) cb->txdepth);
 			break;
 		case 'Z':
-			cb->stag0 = 1;
-			DEBUG_LOG("using stag 0 for lkeys\n");
+			cb->local_dma_lkey = 1;
+			DEBUG_LOG("using local dma lkey\n");
 			break;
 		case 'R':
 			cb->read_inv = 1;
