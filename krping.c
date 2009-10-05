@@ -871,7 +871,7 @@ static u32 krping_rdma_rkey(struct krping_cb *cb, u64 buf, int post_inv)
 		if (buf == (u64)cb->start_dma_addr)
 			cb->fastreg_wr.wr.fast_reg.access_flags = IB_ACCESS_REMOTE_READ;
 		else
-			cb->fastreg_wr.wr.fast_reg.access_flags = IB_ACCESS_REMOTE_WRITE;
+			cb->fastreg_wr.wr.fast_reg.access_flags = IB_ACCESS_REMOTE_WRITE | IB_ACCESS_LOCAL_WRITE;
 		cb->fastreg_wr.wr.fast_reg.iova_start = buf;
 		p = (u64)(buf & PAGE_MASK);
 		for (i=0; i < cb->fastreg_wr.wr.fast_reg.page_list_len; 
