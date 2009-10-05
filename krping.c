@@ -429,12 +429,6 @@ static void krping_cq_event_handler(struct ib_cq *cq, void *ctx)
 			wake_up_interruptible(&cb->sem);
 			break;
 
-		case IB_WC_LOCAL_INV:
-		case IB_WC_FAST_REG_MR:
-			printk(KERN_ERR PFX
-			       "Unexpected opcode %d, most likely unsignalled\n",
-			       __func__, __LINE__, wc.opcode);
-			break;
 		default:
 			printk(KERN_ERR PFX
 			       "Unexpected opcode %d, Shutting down\n",
@@ -779,6 +773,7 @@ static int krping_create_qp(struct krping_cb *cb)
 	init_attr.qp_type = IB_QPT_RC;
 	init_attr.send_cq = cb->cq;
 	init_attr.recv_cq = cb->cq;
+	init_attr.sq_sig_type = IB_SIGNAL_REQ_WR;
 
 	if (cb->server) {
 		ret = rdma_create_qp(cb->child_cm_id, cb->pd, &init_attr);
