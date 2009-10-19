@@ -1672,6 +1672,10 @@ static void krping_test_client(struct krping_cb *cb)
 		cb->start_buf[cb->size - 1] = 0;
 
 		krping_format_send(cb, cb->start_dma_addr);
+		if (cb->state == ERROR) {
+			printk(KERN_ERR PFX "krping_format_send failed\n");
+			break;
+		}
 		ret = ib_post_send(cb->qp, &cb->sq_wr, &bad_wr);
 		if (ret) {
 			printk(KERN_ERR PFX "post send error %d\n", ret);
@@ -1728,6 +1732,10 @@ static void krping_rlat_test_client(struct krping_cb *cb)
 
 	/* Send STAG/TO/Len to client */
 	krping_format_send(cb, cb->start_dma_addr);
+	if (cb->state == ERROR) {
+		printk(KERN_ERR PFX "krping_format_send failed\n");
+		return;
+	}
 	ret = ib_post_send(cb->qp, &cb->sq_wr, &bad_wr);
 	if (ret) {
 		printk(KERN_ERR PFX "post send error %d\n", ret);
@@ -1814,6 +1822,10 @@ static void krping_wlat_test_client(struct krping_cb *cb)
 
 	/* Send STAG/TO/Len to client */
 	krping_format_send(cb, cb->start_dma_addr);
+	if (cb->state == ERROR) {
+		printk(KERN_ERR PFX "krping_format_send failed\n");
+		return;
+	}
 	ret = ib_post_send(cb->qp, &cb->sq_wr, &bad_wr);
 	if (ret) {
 		printk(KERN_ERR PFX "post send error %d\n", ret);
@@ -1849,6 +1861,10 @@ static void krping_bw_test_client(struct krping_cb *cb)
 
 	/* Send STAG/TO/Len to client */
 	krping_format_send(cb, cb->start_dma_addr);
+	if (cb->state == ERROR) {
+		printk(KERN_ERR PFX "krping_format_send failed\n");
+		return;
+	}
 	ret = ib_post_send(cb->qp, &cb->sq_wr, &bad_wr);
 	if (ret) {
 		printk(KERN_ERR PFX "post send error %d\n", ret);
