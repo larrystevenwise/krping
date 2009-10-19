@@ -377,7 +377,7 @@ static void krping_cq_event_handler(struct ib_cq *cq, void *ctx)
 				continue;
 			} else {
 				printk(KERN_ERR PFX "cq completion failed with "
-				       "wr_id %x status %d opcode %d vender_err %x\n",
+				       "wr_id %Lx status %d opcode %d vender_err %x\n",
 					wc.wr_id, wc.status, wc.opcode, wc.vendor_err);
 				goto error;
 			}
@@ -431,7 +431,7 @@ static void krping_cq_event_handler(struct ib_cq *cq, void *ctx)
 
 		default:
 			printk(KERN_ERR PFX
-			       "Unexpected opcode %d, Shutting down\n",
+			       "%s:%d Unexpected opcode %d, Shutting down\n",
 			       __func__, __LINE__, wc.opcode);
 			goto error;
 		}
@@ -2250,7 +2250,6 @@ static int __init krping_init(void)
 		printk(KERN_ERR PFX "cannot create /proc/krping\n");
 		return -ENOMEM;
 	}
-	krping_proc->owner = THIS_MODULE;
 	krping_proc->read_proc = krping_read_proc;
 	krping_proc->write_proc = krping_write_proc;
 	return 0;
