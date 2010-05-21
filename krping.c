@@ -44,6 +44,7 @@
 #include <linux/in.h>
 #include <linux/device.h>
 #include <linux/pci.h>
+#include <linux/time.h>
 #include <asm/system.h>
 
 #include <asm/atomic.h>
@@ -91,6 +92,7 @@ static const struct krping_option krping_opts[] = {
  	{"poll", OPT_NOPARAM, 'P'},
  	{"local_dma_lkey", OPT_NOPARAM, 'Z'},
  	{"read_inv", OPT_NOPARAM, 'R'},
+ 	{"fr", OPT_NOPARAM, 'f'},
 	{NULL, 0, 0}
 };
 
@@ -239,7 +241,8 @@ struct krping_cb {
 	int duplex;			/* run bw full duplex test */
 	int poll;			/* poll or block for rlat test */
 	int txdepth;			/* SQ depth */
-	int local_dma_lkey;			/* use 0 for lkey */
+	int local_dma_lkey;		/* use 0 for lkey */
+	int frtest;			/* fastreg test */
 
 	/* CM stuff */
 	struct rdma_cm_id *cm_id;	/* connection on client side,*/
@@ -366,6 +369,10 @@ static void krping_cq_event_handler(struct ib_cq *cq, void *ctx)
 	BUG_ON(cb->cq != cq);
 	if (cb->state == ERROR) {
 		printk(KERN_ERR PFX "cq completion in ERROR state\n");
+		return;
+	}
+	if (cb->frtest) {
+		printk(KERN_ERR PFX "cq completion event in frtest!\n");
 		return;
 	}
 	if (!cb->wlat && !cb->rlat && !cb->bw)
@@ -814,7 +821,7 @@ static int krping_setup_qp(struct krping_cb *cb, struct rdma_cm_id *cm_id)
 	}
 	DEBUG_LOG("created cq %p\n", cb->cq);
 
-	if (!cb->wlat && !cb->rlat && !cb->bw) {
+	if (!cb->wlat && !cb->rlat && !cb->bw && !cb->frtest) {
 		ret = ib_req_notify_cq(cb->cq, IB_CQ_NEXT_COMP);
 		if (ret) {
 			printk(KERN_ERR PFX "ib_create_cq failed\n");
@@ -1890,6 +1897,119 @@ static void krping_bw_test_client(struct krping_cb *cb)
 	bw_test(cb);
 }
 
+static void krping_fr_test(struct krping_cb *cb)
+{
+	struct ib_fast_reg_page_list *pl;
+	struct ib_send_wr fr, inv, *bad;
+	struct ib_wc wc;
+	u8 key = 0;
+	struct ib_mr *mr;
+	int i;
+	int ret;
+	int size = cb->size;
+	int plen = (((size - 1) & PAGE_MASK) + PAGE_SIZE) >> PAGE_SHIFT;
+	unsigned long start;
+	int count = 0;
+	int scnt = 0;
+
+	pl = ib_alloc_fast_reg_page_list(cb->qp->device, plen);
+	if (IS_ERR(pl)) {
+		printk(KERN_ERR PFX "ib_alloc_fast_reg_page_list failed %ld\n", PTR_ERR(pl));
+		return;
+	}
+	
+	mr = ib_alloc_fast_reg_mr(cb->pd, plen);
+	if (IS_ERR(mr)) {
+		printk(KERN_ERR PFX "ib_alloc_fast_reg_mr failed %ld\n", PTR_ERR(pl));
+		goto err1;
+	}
+
+	for (i=0; i<plen; i++)
+		pl->page_list[i] = 0xcafebabe | i;
+	
+	memset(&fr, 0, sizeof fr);
+	fr.opcode = IB_WR_FAST_REG_MR;
+	fr.wr.fast_reg.page_shift = PAGE_SHIFT;
+	fr.wr.fast_reg.length = size;
+	fr.wr.fast_reg.page_list = pl;
+	fr.wr.fast_reg.page_list_len = plen;
+	fr.wr.fast_reg.iova_start = 0;
+	fr.wr.fast_reg.access_flags = IB_ACCESS_REMOTE_WRITE | IB_ACCESS_LOCAL_WRITE;
+	fr.next = &inv;
+	memset(&inv, 0, sizeof inv);
+	inv.opcode = IB_WR_LOCAL_INV;
+	inv.send_flags = IB_SEND_SIGNALED;
+	
+	DEBUG_LOG("fr_test: stag index 0x%x plen %u size %u depth %u\n", mr->rkey >> 8, plen, cb->size, cb->txdepth);
+	start = get_seconds();
+	while (1) {
+		if ((get_seconds() - start) >= 9) {
+			DEBUG_LOG("fr_test: pausing 1 second! count %u latest size %u plen %u\n", count, size, plen);
+			wait_event_interruptible_timeout(cb->sem, cb->state == ERROR, HZ);
+			if (cb->state == ERROR)
+				break;
+			start = get_seconds();
+		}	
+		while (scnt < (cb->txdepth>>1)) {
+			ib_update_fast_reg_key(mr, ++key);
+			fr.wr.fast_reg.rkey = mr->rkey;
+			inv.ex.invalidate_rkey = mr->rkey;
+			size = random32() % cb->size;
+			if (size == 0)
+				size = cb->size;
+			plen = (((size - 1) & PAGE_MASK) + PAGE_SIZE) >> PAGE_SHIFT;
+			fr.wr.fast_reg.length = size;
+			fr.wr.fast_reg.page_list_len = plen;
+			ret = ib_post_send(cb->qp, &fr, &bad);
+			if (ret) {
+				printk(KERN_ERR PFX "ib_post_send failed %d\n", ret);
+				goto err2;	
+			}
+			scnt++;
+		}
+
+		do {
+			ret = ib_poll_cq(cb->cq, 1, &wc);
+			if (ret < 0) {
+				printk(KERN_ERR PFX "ib_poll_cq failed %d\n", ret);
+				goto err2;	
+			}
+			if (ret == 1) {
+				if (wc.status) {
+					printk(KERN_ERR PFX "completion error %u\n", wc.status);
+					goto err2;
+				}
+				count++;
+				scnt--;
+			}
+			else if (signal_pending(current)) {
+				printk(KERN_ERR PFX "signal!\n");
+				goto err2;
+			}
+		} while (ret == 1);
+	}
+err2:
+	DEBUG_LOG("sleeping 1 second\n");
+	wait_event_interruptible_timeout(cb->sem, cb->state == ERROR, HZ);
+	DEBUG_LOG("draining the cq...\n");
+	do {
+		ret = ib_poll_cq(cb->cq, 1, &wc);
+		if (ret < 0) {
+			printk(KERN_ERR PFX "ib_poll_cq failed %d\n", ret);
+			break;
+		}
+		if (ret == 1) {
+			if (wc.status) {
+				printk(KERN_ERR PFX "completion error %u opcode %u\n", wc.status, wc.opcode);
+			}
+		}
+	} while (ret == 1);
+	DEBUG_LOG("fr_test: done!\n");
+	ib_dereg_mr(mr);
+err1:
+	ib_free_fast_reg_page_list(pl);
+}
+
 static int krping_connect_client(struct krping_cb *cb)
 {
 	struct rdma_conn_param conn_param;
@@ -1987,6 +2107,8 @@ static void krping_run_client(struct krping_cb *cb)
 		krping_rlat_test_client(cb);
 	else if (cb->bw)
 		krping_bw_test_client(cb);
+	else if (cb->frtest)
+		krping_fr_test(cb);
 	else
 		krping_test_client(cb);
 	rdma_disconnect(cb->cm_id);
@@ -2115,6 +2237,10 @@ int krping_doit(char *cmd)
 			cb->read_inv = 1;
 			DEBUG_LOG("using read-with-inv\n");
 			break;
+		case 'f':
+			cb->frtest = 1;
+			DEBUG_LOG("fast-reg test!\n");
+			break;
 		default:
 			printk(KERN_ERR PFX "unknown opt %s\n", optarg);
 			ret = -EINVAL;
@@ -2130,8 +2256,14 @@ int krping_doit(char *cmd)
 		goto out;
 	}
 
-	if ((cb->bw + cb->rlat + cb->wlat) > 1) {
-		printk(KERN_ERR PFX "Pick only one test: bw, rlat, wlat\n");
+	if (cb->server && cb->frtest) {
+		printk(KERN_ERR PFX "must be client to run frtest\n");
+		ret = -EINVAL;
+		goto out;
+	}
+
+	if ((cb->frtest + cb->bw + cb->rlat + cb->wlat) > 1) {
+		printk(KERN_ERR PFX "Pick only one test: fr, bw, rlat, wlat\n");
 		ret = -EINVAL;
 		goto out;
 	}
