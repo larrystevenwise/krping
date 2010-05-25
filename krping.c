@@ -2320,6 +2320,8 @@ static int krping_read_proc(char *page, char **start, off_t off, int count,
 	char *cp = page;
 	int num = 1;
 
+	if (!try_module_get(THIS_MODULE))
+		return -ENODEV;
 	DEBUG_LOG(KERN_INFO PFX "proc read called...\n");
 	*cp = 0;
 	down(&krping_mutex);
@@ -2340,6 +2342,7 @@ static int krping_read_proc(char *page, char **start, off_t off, int count,
 	}
 	up(&krping_mutex);
 	*eof = 1;
+	module_put(THIS_MODULE);
 	return strlen(page);
 }
 
@@ -2351,6 +2354,9 @@ static int krping_write_proc(struct file *file, const char *buffer,
 {
 	char *cmd;
 	int rc;
+
+	if (!try_module_get(THIS_MODULE))
+		return -ENODEV;
 
 	cmd = kmalloc(count, GFP_KERNEL);
 	if (cmd == NULL) {
@@ -2368,6 +2374,7 @@ static int krping_write_proc(struct file *file, const char *buffer,
 	DEBUG_LOG(KERN_INFO PFX "proc write |%s|\n", cmd);
 	rc = krping_doit(cmd);
 	kfree(cmd);
+	module_put(THIS_MODULE);
 	if (rc)
 		return rc;
 	else
