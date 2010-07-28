@@ -45,6 +45,7 @@
 #include <linux/device.h>
 #include <linux/pci.h>
 #include <linux/time.h>
+#include <linux/sched.h>
 #include <asm/system.h>
 
 #include <asm/atomic.h>
