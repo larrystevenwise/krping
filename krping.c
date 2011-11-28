@@ -111,7 +111,11 @@ struct krping_stats {
 #define htonll(x) cpu_to_be64((x))
 #define ntohll(x) cpu_to_be64((x))
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 37)
 static DECLARE_MUTEX(krping_mutex);
+#else
+static DEFINE_SEMAPHORE(krping_mutex);
+#endif
 
 /*
  * List of running krping threads.
