@@ -513,8 +513,9 @@ static void krping_setup_wr(struct krping_cb *cb)
 	cb->sq_wr.sg_list = &cb->send_sgl;
 	cb->sq_wr.num_sge = 1;
 
-	if (cb->server) {
+	if (cb->server || cb->wlat || cb->rlat || cb->bw) {
 		cb->rdma_sgl.addr = cb->rdma_dma_addr;
+		cb->rdma_sgl.lkey = cb->rdma_mr->lkey;
 		cb->rdma_sq_wr.send_flags = IB_SEND_SIGNALED;
 		cb->rdma_sq_wr.sg_list = &cb->rdma_sgl;
 		cb->rdma_sq_wr.num_sge = 1;
@@ -954,7 +955,7 @@ static void krping_format_send(struct krping_cb *cb, u64 buf)
 	 * advertising the rdma buffer.  Server side
 	 * sends have no data.
 	 */
-	if (!cb->server) {
+	if (!cb->server || cb->wlat || cb->rlat || cb->bw) {
 		rkey = krping_rdma_rkey(cb, buf, !cb->server_invalidate);
 		info->buf = htonll(buf);
 		info->rkey = htonl(rkey);
@@ -1514,7 +1515,7 @@ static void krping_wlat_test_server(struct krping_cb *cb)
 	}
 
 	wlat_test(cb);
-
+	wait_event_interruptible(cb->sem, cb->state == ERROR);
 }
 
 static void krping_bw_test_server(struct krping_cb *cb)
