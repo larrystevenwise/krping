@@ -985,6 +985,7 @@ static void krping_test_server(struct krping_cb *cb)
 		cb->rdma_sq_wr.wr.rdma.remote_addr = cb->remote_addr;
 		cb->rdma_sq_wr.sg_list->length = cb->remote_len;
 		cb->rdma_sgl.lkey = krping_rdma_rkey(cb, cb->rdma_dma_addr, 1);
+		cb->rdma_sq_wr.next = NULL;
 
 		/* Issue RDMA Read. */
 		if (cb->read_inv)
@@ -1010,7 +1011,6 @@ static void krping_test_server(struct krping_cb *cb)
 			printk(KERN_ERR PFX "post send error %d\n", ret);
 			break;
 		}
-		cb->rdma_sq_wr.next = NULL;
 
 		DEBUG_LOG("server posted rdma read req \n");
 
