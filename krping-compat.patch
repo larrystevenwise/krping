@@ -1,0 +1,15 @@
+--- a/drivers/infiniband/hw/cxgb3/Makefile	2007-09-12 05:28:57.000000000 -0500
++++ b/drivers/infiniband/hw/cxgb3/Makefile	2007-09-26 09:59:53.000000000 -0500
+@@ -1,8 +1,11 @@
+ ccflags-y := -I$(CWD)/drivers/net/ethernet/chelsio/cxgb3
+
+ obj-$(CONFIG_INFINIBAND_CXGB3) += iw_cxgb3.o
++obj-$(CONFIG_INFINIBAND_CXGB3) += rdma_krping.o
+
+ iw_cxgb3-y :=  iwch_cm.o iwch_ev.o iwch_cq.o iwch_qp.o iwch_mem.o \
+	       iwch_provider.o iwch.o cxio_hal.o cxio_resource.o
+
++rdma_krping-y := krping.o getopt.o
++
+ ccflags-$(CONFIG_INFINIBAND_CXGB3_DEBUG) += -DDEBUG
+

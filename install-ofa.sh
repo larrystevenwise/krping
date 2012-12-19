@@ -13,7 +13,12 @@ if [[ $? -ne 0 ]] ; then
 fi
 
 echo "Patching $1/drivers/infiniband/hw/cxgb3/Makefile"
-patch -d $1 -p1 < krping-ofa.patch
+is_compat_rdma=`echo $1 | grep -c compat-rdma`
+if [ $is_compat_rdma -gt 0 ]; then
+	patch -d $1 -p1 < krping-compat.patch
+else
+	patch -d $1 -p1 < krping-ofa.patch
+fi
 if [[ $? -ne 0 ]] ; then
 	echo "path apply failed!"
 	exit 1
