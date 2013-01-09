@@ -1,0 +1,14 @@
+diff --git a/krping.c b/krping.c
+index 84b687a..d1aed3e 100644
+--- a/drivers/infiniband/hw/cxgb3/krping.c
++++ b/drivers/infiniband/hw/cxgb3/krping.c
+@@ -2292,7 +2292,8 @@ int krping_doit(char *cmd)
+ 		goto out;
+ 	}
+ 
+-	cb->cm_id = rdma_create_id(krping_cma_event_handler, cb, RDMA_PS_TCP);
++	cb->cm_id = rdma_create_id(krping_cma_event_handler, cb, RDMA_PS_TCP,
++				   IB_QPT_RC);
+ 	if (IS_ERR(cb->cm_id)) {
+ 		ret = PTR_ERR(cb->cm_id);
+ 		printk(KERN_ERR PFX "rdma_create_id error %d\n", ret);

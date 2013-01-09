@@ -16,6 +16,7 @@ echo "Patching $1/drivers/infiniband/hw/cxgb3/Makefile"
 is_compat_rdma=`echo $1 | grep -c compat-rdma`
 if [ $is_compat_rdma -gt 0 ]; then
 	patch -d $1 -p1 < krping-compat.patch
+	patch -d $1 -p1 < rdma_create_id.patch
 else
 	patch -d $1 -p1 < krping-ofa.patch
 fi
