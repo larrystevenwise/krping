@@ -574,6 +574,14 @@ static int krping_setup_buffers(struct krping_cb *cb)
 			ret = PTR_ERR(cb->dma_mr);
 			goto bail;
 		}
+		cb->rdma_mr = ib_get_dma_mr(cb->pd, IB_ACCESS_LOCAL_WRITE|
+					    IB_ACCESS_REMOTE_READ|
+				            IB_ACCESS_REMOTE_WRITE);
+		if (IS_ERR(cb->rdma_mr)) {
+			DEBUG_LOG(PFX "reg_dmamr failed\n");
+			ret = PTR_ERR(cb->rdma_mr);
+			goto bail;
+		}
 	} else {
 		if (!cb->local_dma_lkey) {
 			buf.addr = cb->recv_dma_addr;
