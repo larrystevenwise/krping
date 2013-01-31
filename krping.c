@@ -515,7 +515,8 @@ static void krping_setup_wr(struct krping_cb *cb)
 
 	if (cb->server || cb->wlat || cb->rlat || cb->bw) {
 		cb->rdma_sgl.addr = cb->rdma_dma_addr;
-		cb->rdma_sgl.lkey = cb->rdma_mr->lkey;
+		if (cb->mem == MR)
+			cb->rdma_sgl.lkey = cb->rdma_mr->lkey;
 		cb->rdma_sq_wr.send_flags = IB_SEND_SIGNALED;
 		cb->rdma_sq_wr.sg_list = &cb->rdma_sgl;
 		cb->rdma_sq_wr.num_sge = 1;
@@ -572,14 +573,6 @@ static int krping_setup_buffers(struct krping_cb *cb)
 		if (IS_ERR(cb->dma_mr)) {
 			DEBUG_LOG(PFX "reg_dmamr failed\n");
 			ret = PTR_ERR(cb->dma_mr);
-			goto bail;
-		}
-		cb->rdma_mr = ib_get_dma_mr(cb->pd, IB_ACCESS_LOCAL_WRITE|
-					    IB_ACCESS_REMOTE_READ|
-				            IB_ACCESS_REMOTE_WRITE);
-		if (IS_ERR(cb->rdma_mr)) {
-			DEBUG_LOG(PFX "reg_dmamr failed\n");
-			ret = PTR_ERR(cb->rdma_mr);
 			goto bail;
 		}
 	} else {
