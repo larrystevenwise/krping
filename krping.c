@@ -1012,6 +1012,7 @@ static void krping_test_server(struct krping_cb *cb)
 			printk(KERN_ERR PFX "post send error %d\n", ret);
 			break;
 		}
+		cb->rdma_sq_wr.next = NULL;
 
 		DEBUG_LOG("server posted rdma read req \n");
 
