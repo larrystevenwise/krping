@@ -1,6 +1,10 @@
 		Kernel Mode RDMA Ping Module
 		   Steve Wise - 8/2009
 
+---
+Updated 8/2016
+---
+
 ============
 Introduction
 ============
@@ -130,17 +134,17 @@ validate	none		Enables validating the rping data on
 				each iteration to detect data 
 				corruption.
 mem_mode	string		Determines how memory will be 
-				registered.  Modes include mr, dma,
-				and fastreg.  Default is dma.
-server_inv 	none		Valid only in fastreg mode, this 
+				registered.  Modes include dma,
+				and reg.  Default is dma.
+server_inv 	none		Valid only in reg mr mode, this 
 				option enables invalidating the
-				client's fastreg mr via 
+				client's reg mr via 
 				SEND_WITH_INVALIDATE messages from
 				the server.
 local_dma_lkey	none		Use the local dma lkey for the source 
 				of writes and sends, and in recvs
 read_inv	none		Server will use READ_WITH_INV. Only
-				valid in fastreg mem_mode.
+				valid in reg mem_mode.
 				
 ============
 Memory Usage:
@@ -180,15 +184,12 @@ Memory Registration Modes:
 
 Each of these memory areas are registered with the RDMA device using
 whatever memory mode was specified in the command line. The mem_mode
-values include: mr, dma, and fastreg.  The default mode, if not specified,
-is dma.
-
-The mr mem_mode uses a standard memory region for each buffer.  It 
-is registered once at startup.
+values include: dma, and reg (aka fastreg).  The default mode, if not
+specified, is dma.
 
 The dma mem_mode uses a single dma_mr for all memory buffers.
 
-The fastreg mem_mode uses a fastreg mr on the client side for the
+The reg mem_mode uses a reg mr on the client side for the
 start_buf and rdma_buf buffers.  Each time the client will advertise
 one of these buffers, it invalidates the previous registration and fast
 registers the new buffer with a new key.   If the server_invalidate
@@ -196,9 +197,9 @@ option is on, then the server will do the invalidation via the "go ahead"
 messages using the IB_WR_SEND_WITH_INV opcode.   Otherwise the client
 invalidates the mr using the IB_WR_LOCAL_INV work request.
 
-On the server side, fastreg mem_mode causes the server to use the
-fast_reg_mr rkey for its rdma_buf buffer IO.  Before each rdma read and
-rdma write, the server will post an IB_WR_LOCAL_INV + IB_WR_FAST_REG_MR
+On the server side, reg mem_mode causes the server to use the
+reg_mr rkey for its rdma_buf buffer IO.  Before each rdma read and
+rdma write, the server will post an IB_WR_LOCAL_INV + IB_WR_REG_MR
 WR chain to register the buffer with a new key.  If the krping read-inv
 option is set then the server will use IB_WR_READ_WITH_INV to do the
 rdma read and skip the IB_WR_LOCAL_INV wr before re-registering the
