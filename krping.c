@@ -70,9 +70,7 @@ MODULE_LICENSE("Dual BSD/GPL");
 
 enum mem_type {
 	DMA = 1,
-	FASTREG = 2,
-	MW = 3,
-	MR = 4
+	REG = 2,
 };
 
 static const struct krping_option krping_opts[] = {
@@ -113,11 +111,7 @@ struct krping_stats {
 #define htonll(x) cpu_to_be64((x))
 #define ntohll(x) cpu_to_be64((x))
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 37)
-static DECLARE_MUTEX(krping_mutex);
-#else
-static DEFINE_SEMAPHORE(krping_mutex);
-#endif
+static DEFINE_MUTEX(krping_mutex);
 
 /*
  * List of running krping threads.
@@ -192,31 +186,26 @@ struct krping_cb {
 
 	struct ib_fast_reg_page_list *page_list;
 	int page_list_len;
-	struct ib_send_wr fastreg_wr;
+	struct ib_reg_wr reg_mr_wr;
 	struct ib_send_wr invalidate_wr;
-	struct ib_mr *fastreg_mr;
+	struct ib_mr *reg_mr;
 	int server_invalidate;
 	int read_inv;
 	u8 key;
-
-	struct ib_mw *mw;
-	struct ib_mw_bind bind_attr;
 
 	struct ib_recv_wr rq_wr;	/* recv work request record */
 	struct ib_sge recv_sgl;		/* recv single SGE */
 	struct krping_rdma_info recv_buf;/* malloc'd buffer */
 	u64 recv_dma_addr;
 	DECLARE_PCI_UNMAP_ADDR(recv_mapping)
-	struct ib_mr *recv_mr;
 
 	struct ib_send_wr sq_wr;	/* send work requrest record */
 	struct ib_sge send_sgl;
 	struct krping_rdma_info send_buf;/* single send buf */
 	u64 send_dma_addr;
 	DECLARE_PCI_UNMAP_ADDR(send_mapping)
-	struct ib_mr *send_mr;
 
-	struct ib_send_wr rdma_sq_wr;	/* rdma work request record */
+	struct ib_rdma_wr rdma_sq_wr;	/* rdma work request record */
 	struct ib_sge rdma_sgl;		/* rdma single SGE */
 	char *rdma_buf;			/* used as rdma sink */
 	u64  rdma_dma_addr;
@@ -251,7 +240,7 @@ struct krping_cb {
 	int poll;			/* poll or block for rlat test */
 	int txdepth;			/* SQ depth */
 	int local_dma_lkey;		/* use 0 for lkey */
-	int frtest;			/* fastreg test */
+	int frtest;			/* reg test */
 
 	/* CM stuff */
 	struct rdma_cm_id *cm_id;	/* connection on client side,*/
@@ -408,7 +397,7 @@ static void krping_cq_event_handler(struct ib_cq *cq, void *ctx)
 
 		case IB_WC_RDMA_WRITE:
 			DEBUG_LOG("rdma write completion\n");
-			cb->stats.write_bytes += cb->rdma_sq_wr.sg_list->length;
+			cb->stats.write_bytes += cb->rdma_sq_wr.wr.sg_list->length;
 			cb->stats.write_msgs++;
 			cb->state = RDMA_WRITE_COMPLETE;
 			wake_up_interruptible(&cb->sem);
@@ -416,7 +405,7 @@ static void krping_cq_event_handler(struct ib_cq *cq, void *ctx)
 
 		case IB_WC_RDMA_READ:
 			DEBUG_LOG("rdma read completion\n");
-			cb->stats.read_bytes += cb->rdma_sq_wr.sg_list->length;
+			cb->stats.read_bytes += cb->rdma_sq_wr.wr.sg_list->length;
 			cb->stats.read_msgs++;
 			cb->state = RDMA_READ_COMPLETE;
 			wake_up_interruptible(&cb->sem);
@@ -494,23 +483,13 @@ static void krping_setup_wr(struct krping_cb *cb)
 {
 	cb->recv_sgl.addr = cb->recv_dma_addr;
 	cb->recv_sgl.length = sizeof cb->recv_buf;
-	if (cb->local_dma_lkey)
-		cb->recv_sgl.lkey = cb->qp->device->local_dma_lkey;
-	else if (cb->mem == DMA)
-		cb->recv_sgl.lkey = cb->dma_mr->lkey;
-	else
-		cb->recv_sgl.lkey = cb->recv_mr->lkey;
+	cb->recv_sgl.lkey = cb->qp->device->local_dma_lkey;
 	cb->rq_wr.sg_list = &cb->recv_sgl;
 	cb->rq_wr.num_sge = 1;
 
 	cb->send_sgl.addr = cb->send_dma_addr;
 	cb->send_sgl.length = sizeof cb->send_buf;
-	if (cb->local_dma_lkey)
-		cb->send_sgl.lkey = cb->qp->device->local_dma_lkey;
-	else if (cb->mem == DMA)
-		cb->send_sgl.lkey = cb->dma_mr->lkey;
-	else
-		cb->send_sgl.lkey = cb->send_mr->lkey;
+	cb->send_sgl.lkey = cb->qp->device->local_dma_lkey;
 
 	cb->sq_wr.opcode = IB_WR_SEND;
 	cb->sq_wr.send_flags = IB_SEND_SIGNALED;
@@ -519,34 +498,24 @@ static void krping_setup_wr(struct krping_cb *cb)
 
 	if (cb->server || cb->wlat || cb->rlat || cb->bw) {
 		cb->rdma_sgl.addr = cb->rdma_dma_addr;
-		if (cb->mem == MR)
-			cb->rdma_sgl.lkey = cb->rdma_mr->lkey;
-		cb->rdma_sq_wr.send_flags = IB_SEND_SIGNALED;
-		cb->rdma_sq_wr.sg_list = &cb->rdma_sgl;
-		cb->rdma_sq_wr.num_sge = 1;
+		cb->rdma_sq_wr.wr.send_flags = IB_SEND_SIGNALED;
+		cb->rdma_sq_wr.wr.sg_list = &cb->rdma_sgl;
+		cb->rdma_sq_wr.wr.num_sge = 1;
 	}
 
 	switch(cb->mem) {
-	case FASTREG:
+	case REG:
 
 		/* 
-		 * A chain of 2 WRs, INVALDATE_MR + FAST_REG_MR.
+		 * A chain of 2 WRs, INVALDATE_MR + REG_MR.
 		 * both unsignaled.  The client uses them to reregister
 		 * the rdma buffers with a new key each iteration.
 		 */
-		cb->fastreg_wr.opcode = IB_WR_FAST_REG_MR;
-		cb->fastreg_wr.wr.fast_reg.page_shift = PAGE_SHIFT;
-		cb->fastreg_wr.wr.fast_reg.length = cb->size;
-		cb->fastreg_wr.wr.fast_reg.page_list = cb->page_list;
-		cb->fastreg_wr.wr.fast_reg.page_list_len = cb->page_list_len;
+		cb->reg_mr_wr.wr.opcode = IB_WR_REG_MR;
+		cb->reg_mr_wr.mr = cb->reg_mr;
 
-		cb->invalidate_wr.next = &cb->fastreg_wr;
+		cb->invalidate_wr.next = &cb->reg_mr_wr.wr;
 		cb->invalidate_wr.opcode = IB_WR_LOCAL_INV;
-		break;
-	case MW:
-		cb->bind_attr.wr_id = 0xabbaabba;
-		cb->bind_attr.send_flags = 0; /* unsignaled */
-		cb->bind_attr.bind_info.length = cb->size;
 		break;
 	default:
 		break;
@@ -556,8 +525,6 @@ static void krping_setup_wr(struct krping_cb *cb)
 static int krping_setup_buffers(struct krping_cb *cb)
 {
 	int ret;
-	struct ib_phys_buf buf;
-	u64 iovbase;
 
 	DEBUG_LOG(PFX "krping_setup_buffers called on cb %p\n", cb);
 
@@ -579,37 +546,6 @@ static int krping_setup_buffers(struct krping_cb *cb)
 			ret = PTR_ERR(cb->dma_mr);
 			goto bail;
 		}
-	} else {
-		if (!cb->local_dma_lkey) {
-			buf.addr = cb->recv_dma_addr;
-			buf.size = sizeof cb->recv_buf;
-			DEBUG_LOG(PFX "recv buf dma_addr %llx size %d\n", buf.addr, 
-				(int)buf.size);
-			iovbase = cb->recv_dma_addr;
-			cb->recv_mr = ib_reg_phys_mr(cb->pd, &buf, 1, 
-						     IB_ACCESS_LOCAL_WRITE, 
-						     &iovbase);
-
-			if (IS_ERR(cb->recv_mr)) {
-				DEBUG_LOG(PFX "recv_buf reg_mr failed\n");
-				ret = PTR_ERR(cb->recv_mr);
-				goto bail;
-			}
-
-			buf.addr = cb->send_dma_addr;
-			buf.size = sizeof cb->send_buf;
-			DEBUG_LOG(PFX "send buf dma_addr %llx size %d\n", buf.addr, 
-				(int)buf.size);
-			iovbase = cb->send_dma_addr;
-			cb->send_mr = ib_reg_phys_mr(cb->pd, &buf, 1, 
-						     0, &iovbase);
-
-			if (IS_ERR(cb->send_mr)) {
-				DEBUG_LOG(PFX "send_buf reg_mr failed\n");
-				ret = PTR_ERR(cb->send_mr);
-				goto bail;
-			}
-		}
 	}
 
 	cb->rdma_buf = kmalloc(cb->size, GFP_KERNEL);
@@ -623,60 +559,18 @@ static int krping_setup_buffers(struct krping_cb *cb)
 			       cb->rdma_buf, cb->size, 
 			       DMA_BIDIRECTIONAL);
 	pci_unmap_addr_set(cb, rdma_mapping, cb->rdma_dma_addr);
-	if (cb->mem != DMA) {
-		switch (cb->mem) {
-		case FASTREG:
-			cb->page_list_len = (((cb->size - 1) & PAGE_MASK) +
-				PAGE_SIZE) >> PAGE_SHIFT;
-			cb->page_list = ib_alloc_fast_reg_page_list(
-						cb->pd->device, 
-						cb->page_list_len);
-			if (IS_ERR(cb->page_list)) {
-				DEBUG_LOG(PFX "recv_buf reg_mr failed\n");
-				ret = PTR_ERR(cb->page_list);
-				goto bail;
-			}
-			cb->fastreg_mr = ib_alloc_fast_reg_mr(cb->pd, 
-					cb->page_list->max_page_list_len);
-			if (IS_ERR(cb->fastreg_mr)) {
-				DEBUG_LOG(PFX "recv_buf reg_mr failed\n");
-				ret = PTR_ERR(cb->fastreg_mr);
-				goto bail;
-			}
-			DEBUG_LOG(PFX "fastreg rkey 0x%x page_list %p"
-				" page_list_len %u\n", cb->fastreg_mr->rkey, 
-				cb->page_list, cb->page_list_len);
-			break;
-		case MW:
-			cb->mw = ib_alloc_mw(cb->pd, 1);
-			if (IS_ERR(cb->mw)) {
-				DEBUG_LOG(PFX "recv_buf alloc_mw failed\n");
-				ret = PTR_ERR(cb->mw);
-				goto bail;
-			}
-			DEBUG_LOG(PFX "mw rkey 0x%x\n", cb->mw->rkey);
-			/*FALLTHROUGH*/
-		case MR:
-			buf.addr = cb->rdma_dma_addr;
-			buf.size = cb->size;
-			iovbase = cb->rdma_dma_addr;
-			cb->rdma_mr = ib_reg_phys_mr(cb->pd, &buf, 1, 
-					     IB_ACCESS_REMOTE_READ| 
-					     IB_ACCESS_REMOTE_WRITE, 
-					     &iovbase);
-			if (IS_ERR(cb->rdma_mr)) {
-				DEBUG_LOG(PFX "rdma_buf reg_mr failed\n");
-				ret = PTR_ERR(cb->rdma_mr);
-				goto bail;
-			}
-			DEBUG_LOG(PFX "rdma buf dma_addr %llx size %d mr rkey 0x%x\n", 
-				buf.addr, (int)buf.size, cb->rdma_mr->rkey);
-			break;
-		default:
-			ret = -EINVAL;
+	if (cb->mem == REG) {
+		cb->page_list_len = (((cb->size - 1) & PAGE_MASK) + PAGE_SIZE)
+					>> PAGE_SHIFT;
+		cb->reg_mr = ib_alloc_mr(cb->pd,  IB_MR_TYPE_MEM_REG,
+					 cb->page_list_len);
+		if (IS_ERR(cb->reg_mr)) {
+			ret = PTR_ERR(cb->reg_mr);
+			DEBUG_LOG(PFX "recv_buf reg_mr failed %d\n", ret);
 			goto bail;
-			break;
 		}
+		DEBUG_LOG(PFX "reg rkey 0x%x page_list_len %u\n",
+			cb->reg_mr->rkey, cb->page_list_len);
 	}
 
 	if (!cb->server || cb->wlat || cb->rlat || cb->bw) {
@@ -692,48 +586,18 @@ static int krping_setup_buffers(struct krping_cb *cb)
 						   cb->start_buf, cb->size, 
 						   DMA_BIDIRECTIONAL);
 		pci_unmap_addr_set(cb, start_mapping, cb->start_dma_addr);
-
-		if (cb->mem == MR || cb->mem == MW) {
-			unsigned flags = IB_ACCESS_REMOTE_READ;
-
-			if (cb->wlat || cb->rlat || cb->bw)
-				flags |= IB_ACCESS_REMOTE_WRITE;
-
-			buf.addr = cb->start_dma_addr;
-			buf.size = cb->size;
-			DEBUG_LOG(PFX "start buf dma_addr %llx size %d\n", 
-				buf.addr, (int)buf.size);
-			iovbase = cb->start_dma_addr;
-			cb->start_mr = ib_reg_phys_mr(cb->pd, &buf, 1, 
-					     flags,
-					     &iovbase);
-
-			if (IS_ERR(cb->start_mr)) {
-				DEBUG_LOG(PFX "start_buf reg_mr failed\n");
-				ret = PTR_ERR(cb->start_mr);
-				goto bail;
-			}
-		}
 	}
 
 	krping_setup_wr(cb);
 	DEBUG_LOG(PFX "allocated & registered buffers...\n");
 	return 0;
 bail:
-	if (cb->fastreg_mr && !IS_ERR(cb->fastreg_mr))
-		ib_dereg_mr(cb->fastreg_mr);
-	if (cb->mw && !IS_ERR(cb->mw))
-		ib_dealloc_mw(cb->mw);
+	if (cb->reg_mr && !IS_ERR(cb->reg_mr))
+		ib_dereg_mr(cb->reg_mr);
 	if (cb->rdma_mr && !IS_ERR(cb->rdma_mr))
 		ib_dereg_mr(cb->rdma_mr);
-	if (cb->page_list && !IS_ERR(cb->page_list))
-		ib_free_fast_reg_page_list(cb->page_list);
 	if (cb->dma_mr && !IS_ERR(cb->dma_mr))
 		ib_dereg_mr(cb->dma_mr);
-	if (cb->recv_mr && !IS_ERR(cb->recv_mr))
-		ib_dereg_mr(cb->recv_mr);
-	if (cb->send_mr && !IS_ERR(cb->send_mr))
-		ib_dereg_mr(cb->send_mr);
 	if (cb->rdma_buf)
 		kfree(cb->rdma_buf);
 	if (cb->start_buf)
@@ -747,18 +611,12 @@ static void krping_free_buffers(struct krping_cb *cb)
 	
 	if (cb->dma_mr)
 		ib_dereg_mr(cb->dma_mr);
-	if (cb->send_mr)
-		ib_dereg_mr(cb->send_mr);
-	if (cb->recv_mr)
-		ib_dereg_mr(cb->recv_mr);
 	if (cb->rdma_mr)
 		ib_dereg_mr(cb->rdma_mr);
 	if (cb->start_mr)
 		ib_dereg_mr(cb->start_mr);
-	if (cb->fastreg_mr)
-		ib_dereg_mr(cb->fastreg_mr);
-	if (cb->mw)
-		ib_dealloc_mw(cb->mw);
+	if (cb->reg_mr)
+		ib_dereg_mr(cb->reg_mr);
 
 	dma_unmap_single(cb->pd->device->dma_device,
 			 pci_unmap_addr(cb, recv_mapping),
@@ -816,6 +674,8 @@ static void krping_free_qp(struct krping_cb *cb)
 static int krping_setup_qp(struct krping_cb *cb, struct rdma_cm_id *cm_id)
 {
 	int ret;
+	struct ib_cq_init_attr attr = {0};
+
 	cb->pd = ib_alloc_pd(cm_id->device);
 	if (IS_ERR(cb->pd)) {
 		printk(KERN_ERR PFX "ib_alloc_pd failed\n");
@@ -823,8 +683,10 @@ static int krping_setup_qp(struct krping_cb *cb, struct rdma_cm_id *cm_id)
 	}
 	DEBUG_LOG("created pd %p\n", cb->pd);
 
+	attr.cqe = cb->txdepth * 2;
+	attr.comp_vector = 0;
 	cb->cq = ib_create_cq(cm_id->device, krping_cq_event_handler, NULL,
-			      cb, cb->txdepth * 2, 0);
+			      cb, &attr);
 	if (IS_ERR(cb->cq)) {
 		printk(KERN_ERR PFX "ib_create_cq failed\n");
 		ret = PTR_ERR(cb->cq);
@@ -856,97 +718,57 @@ err1:
 
 /*
  * return the (possibly rebound) rkey for the rdma buffer.
- * FASTREG mode: invalidate and rebind via fastreg wr.
- * MW mode: rebind the MW.
+ * REG mode: invalidate and rebind via reg wr.
  * other modes: just return the mr rkey.
  */
 static u32 krping_rdma_rkey(struct krping_cb *cb, u64 buf, int post_inv)
 {
-	u32 rkey = 0xffffffff;
-	u64 p;
+	u32 rkey;
 	struct ib_send_wr *bad_wr;
-	int i;
 	int ret;
+	struct scatterlist sg = {0};
 
-	switch (cb->mem) {
-	case FASTREG:
-		cb->invalidate_wr.ex.invalidate_rkey = cb->fastreg_mr->rkey;
+	if (cb->mem == REG) {
+		cb->invalidate_wr.ex.invalidate_rkey = cb->reg_mr->rkey;
 
 		/*
-		 * Update the fastreg key.
+		 * Update the reg key.
 		 */
-		ib_update_fast_reg_key(cb->fastreg_mr, ++cb->key);
-		cb->fastreg_wr.wr.fast_reg.rkey = cb->fastreg_mr->rkey;
+		ib_update_fast_reg_key(cb->reg_mr, ++cb->key);
+		cb->reg_mr_wr.key = cb->reg_mr->rkey;
 
 		/*
-		 * Update the fastreg WR with new buf info.
+		 * Update the reg WR with new buf info.
 		 */
 		if (buf == (u64)cb->start_dma_addr)
-			cb->fastreg_wr.wr.fast_reg.access_flags = IB_ACCESS_REMOTE_READ;
+			cb->reg_mr_wr.access = IB_ACCESS_REMOTE_READ;
 		else
-			cb->fastreg_wr.wr.fast_reg.access_flags = IB_ACCESS_REMOTE_WRITE | IB_ACCESS_LOCAL_WRITE;
-		cb->fastreg_wr.wr.fast_reg.iova_start = buf;
-		p = (u64)(buf & PAGE_MASK);
-		for (i=0; i < cb->fastreg_wr.wr.fast_reg.page_list_len; 
-		     i++, p += PAGE_SIZE) {
-			cb->page_list->page_list[i] = p;
-			DEBUG_LOG(PFX "page_list[%d] 0x%llx\n", i, p);
-		}
+			cb->reg_mr_wr.access = IB_ACCESS_REMOTE_WRITE | IB_ACCESS_LOCAL_WRITE;
+		sg_dma_address(&sg) = buf;
+		sg_dma_len(&sg) = cb->size;
 
-		DEBUG_LOG(PFX "post_inv = %d, fastreg new rkey 0x%x shift %u len %u"
-			" iova_start %llx page_list_len %u\n",
+		ret = ib_map_mr_sg(cb->reg_mr, &sg, 1, NULL, PAGE_SIZE);
+		BUG_ON(ret <= 0 || ret > cb->page_list_len);
+
+		DEBUG_LOG(PFX "post_inv = %d, reg_mr new rkey 0x%x pgsz %u len %u"
+			" iova_start %llx\n",
 			post_inv,
-			cb->fastreg_wr.wr.fast_reg.rkey,
-			cb->fastreg_wr.wr.fast_reg.page_shift,
-			cb->fastreg_wr.wr.fast_reg.length,
-			cb->fastreg_wr.wr.fast_reg.iova_start,
-			cb->fastreg_wr.wr.fast_reg.page_list_len);
+			cb->reg_mr_wr.key,
+			cb->reg_mr->page_size,
+			cb->reg_mr->length,
+			cb->reg_mr->iova);
 
 		if (post_inv)
 			ret = ib_post_send(cb->qp, &cb->invalidate_wr, &bad_wr);
 		else
-			ret = ib_post_send(cb->qp, &cb->fastreg_wr, &bad_wr);
+			ret = ib_post_send(cb->qp, &cb->reg_mr_wr.wr, &bad_wr);
 		if (ret) {
 			printk(KERN_ERR PFX "post send error %d\n", ret);
 			cb->state = ERROR;
 		}
-		rkey = cb->fastreg_mr->rkey;
-		break;
-	case MW:
-		/*
-		 * Update the MW with new buf info.
-		 */
-		if (buf == (u64)cb->start_dma_addr) {
-			cb->bind_attr.bind_info.mw_access_flags = IB_ACCESS_REMOTE_READ;
-			cb->bind_attr.bind_info.mr = cb->start_mr;
-		} else {
-			cb->bind_attr.bind_info.mw_access_flags = IB_ACCESS_REMOTE_WRITE;
-			cb->bind_attr.bind_info.mr = cb->rdma_mr;
-		}
-		cb->bind_attr.bind_info.addr = buf;
-		DEBUG_LOG(PFX "binding mw rkey 0x%x to buf %llx mr rkey 0x%x\n",
-			cb->mw->rkey, buf, cb->bind_attr.bind_info.mr->rkey);
-		ret = ib_bind_mw(cb->qp, cb->mw, &cb->bind_attr);
-		if (ret) {
-			printk(KERN_ERR PFX "bind mw error %d\n", ret);
-			cb->state = ERROR;
-		} else
-			rkey = cb->mw->rkey;
-		break;
-	case MR:
-		if (buf == (u64)cb->start_dma_addr)
-			rkey = cb->start_mr->rkey;
-		else
-			rkey = cb->rdma_mr->rkey;
-		break;
-	case DMA:
+		rkey = cb->reg_mr->rkey;
+	} else
 		rkey = cb->dma_mr->rkey;
-		break;
-	default:
-		printk(KERN_ERR PFX "%s:%d case ERROR\n", __func__, __LINE__);
-		cb->state = ERROR;
-		break;
-	}
 	return rkey;
 }
 
@@ -956,7 +778,7 @@ static void krping_format_send(struct krping_cb *cb, u64 buf)
 	u32 rkey;
 
 	/*
-	 * Client side will do fastreg or mw bind before
+	 * Client side will do reg or mw bind before
 	 * advertising the rdma buffer.  Server side
 	 * sends have no data.
 	 */
@@ -986,37 +808,37 @@ static void krping_test_server(struct krping_cb *cb)
 
 		DEBUG_LOG("server received sink adv\n");
 
-		cb->rdma_sq_wr.wr.rdma.rkey = cb->remote_rkey;
-		cb->rdma_sq_wr.wr.rdma.remote_addr = cb->remote_addr;
-		cb->rdma_sq_wr.sg_list->length = cb->remote_len;
+		cb->rdma_sq_wr.rkey = cb->remote_rkey;
+		cb->rdma_sq_wr.remote_addr = cb->remote_addr;
+		cb->rdma_sq_wr.wr.sg_list->length = cb->remote_len;
 		cb->rdma_sgl.lkey = krping_rdma_rkey(cb, cb->rdma_dma_addr, 1);
-		cb->rdma_sq_wr.next = NULL;
+		cb->rdma_sq_wr.wr.next = NULL;
 
 		/* Issue RDMA Read. */
 		if (cb->read_inv)
-			cb->rdma_sq_wr.opcode = IB_WR_RDMA_READ_WITH_INV;
+			cb->rdma_sq_wr.wr.opcode = IB_WR_RDMA_READ_WITH_INV;
 		else {
 
-			cb->rdma_sq_wr.opcode = IB_WR_RDMA_READ;
-			if (cb->mem == FASTREG) {
+			cb->rdma_sq_wr.wr.opcode = IB_WR_RDMA_READ;
+			if (cb->mem == REG) {
 				/* 
 				 * Immediately follow the read with a 
 				 * fenced LOCAL_INV.
 				 */
-				cb->rdma_sq_wr.next = &inv;
+				cb->rdma_sq_wr.wr.next = &inv;
 				memset(&inv, 0, sizeof inv);
 				inv.opcode = IB_WR_LOCAL_INV;
-				inv.ex.invalidate_rkey = cb->fastreg_mr->rkey;
+				inv.ex.invalidate_rkey = cb->reg_mr->rkey;
 				inv.send_flags = IB_SEND_FENCE;
 			}
 		}
 
-		ret = ib_post_send(cb->qp, &cb->rdma_sq_wr, &bad_wr);
+		ret = ib_post_send(cb->qp, &cb->rdma_sq_wr.wr, &bad_wr);
 		if (ret) {
 			printk(KERN_ERR PFX "post send error %d\n", ret);
 			break;
 		}
-		cb->rdma_sq_wr.next = NULL;
+		cb->rdma_sq_wr.wr.next = NULL;
 
 		DEBUG_LOG("server posted rdma read req \n");
 
@@ -1060,21 +882,21 @@ static void krping_test_server(struct krping_cb *cb)
 		DEBUG_LOG("server received sink adv\n");
 
 		/* RDMA Write echo data */
-		cb->rdma_sq_wr.opcode = IB_WR_RDMA_WRITE;
-		cb->rdma_sq_wr.wr.rdma.rkey = cb->remote_rkey;
-		cb->rdma_sq_wr.wr.rdma.remote_addr = cb->remote_addr;
-		cb->rdma_sq_wr.sg_list->length = strlen(cb->rdma_buf) + 1;
+		cb->rdma_sq_wr.wr.opcode = IB_WR_RDMA_WRITE;
+		cb->rdma_sq_wr.rkey = cb->remote_rkey;
+		cb->rdma_sq_wr.remote_addr = cb->remote_addr;
+		cb->rdma_sq_wr.wr.sg_list->length = strlen(cb->rdma_buf) + 1;
 		if (cb->local_dma_lkey)
 			cb->rdma_sgl.lkey = cb->qp->device->local_dma_lkey;
 		else 
 			cb->rdma_sgl.lkey = krping_rdma_rkey(cb, cb->rdma_dma_addr, 0);
 			
 		DEBUG_LOG("rdma write from lkey %x laddr %llx len %d\n",
-			  cb->rdma_sq_wr.sg_list->lkey,
-			  (unsigned long long)cb->rdma_sq_wr.sg_list->addr,
-			  cb->rdma_sq_wr.sg_list->length);
+			  cb->rdma_sq_wr.wr.sg_list->lkey,
+			  (unsigned long long)cb->rdma_sq_wr.wr.sg_list->addr,
+			  cb->rdma_sq_wr.wr.sg_list->length);
 
-		ret = ib_post_send(cb->qp, &cb->rdma_sq_wr, &bad_wr);
+		ret = ib_post_send(cb->qp, &cb->rdma_sq_wr.wr, &bad_wr);
 		if (ret) {
 			printk(KERN_ERR PFX "post send error %d\n", ret);
 			break;
@@ -1119,10 +941,10 @@ static void rlat_test(struct krping_cb *cb)
 	int ne;
 
 	scnt = 0;
-	cb->rdma_sq_wr.opcode = IB_WR_RDMA_READ;
-	cb->rdma_sq_wr.wr.rdma.rkey = cb->remote_rkey;
-	cb->rdma_sq_wr.wr.rdma.remote_addr = cb->remote_addr;
-	cb->rdma_sq_wr.sg_list->length = cb->size;
+	cb->rdma_sq_wr.wr.opcode = IB_WR_RDMA_READ;
+	cb->rdma_sq_wr.rkey = cb->remote_rkey;
+	cb->rdma_sq_wr.remote_addr = cb->remote_addr;
+	cb->rdma_sq_wr.wr.sg_list->length = cb->size;
 
 	do_gettimeofday(&start_tv);
 	if (!cb->poll) {
@@ -1132,7 +954,7 @@ static void rlat_test(struct krping_cb *cb)
 	while (scnt < iters) {
 
 		cb->state = RDMA_READ_ADV;
-		ret = ib_post_send(cb->qp, &cb->rdma_sq_wr, &bad_wr);
+		ret = ib_post_send(cb->qp, &cb->rdma_sq_wr.wr, &bad_wr);
 		if (ret) {
 			printk(KERN_ERR PFX  
 				"Couldn't post send: ret=%d scnt %d\n",
@@ -1231,10 +1053,10 @@ static void wlat_test(struct krping_cb *cb)
 		printk(KERN_ERR PFX "%s kmalloc failed\n", __FUNCTION__);
 		return;
 	}
-	cb->rdma_sq_wr.opcode = IB_WR_RDMA_WRITE;
-	cb->rdma_sq_wr.wr.rdma.rkey = cb->remote_rkey;
-	cb->rdma_sq_wr.wr.rdma.remote_addr = cb->remote_addr;
-	cb->rdma_sq_wr.sg_list->length = cb->size;
+	cb->rdma_sq_wr.wr.opcode = IB_WR_RDMA_WRITE;
+	cb->rdma_sq_wr.rkey = cb->remote_rkey;
+	cb->rdma_sq_wr.remote_addr = cb->remote_addr;
+	cb->rdma_sq_wr.wr.sg_list->length = cb->size;
 
 	if (cycle_iters > iters)
 		cycle_iters = iters;
@@ -1259,7 +1081,7 @@ static void wlat_test(struct krping_cb *cb)
 			*buf = (char)scnt+1;
 			if (scnt < cycle_iters)
 				post_cycles_start[scnt] = get_cycles();
-			if (ib_post_send(cb->qp, &cb->rdma_sq_wr, &bad_wr)) {
+			if (ib_post_send(cb->qp, &cb->rdma_sq_wr.wr, &bad_wr)) {
 				printk(KERN_ERR PFX  
 					"Couldn't post send: scnt=%d\n",
 					scnt);
@@ -1373,10 +1195,10 @@ static void bw_test(struct krping_cb *cb)
 		printk(KERN_ERR PFX "%s kmalloc failed\n", __FUNCTION__);
 		return;
 	}
-	cb->rdma_sq_wr.opcode = IB_WR_RDMA_WRITE;
-	cb->rdma_sq_wr.wr.rdma.rkey = cb->remote_rkey;
-	cb->rdma_sq_wr.wr.rdma.remote_addr = cb->remote_addr;
-	cb->rdma_sq_wr.sg_list->length = cb->size;
+	cb->rdma_sq_wr.wr.opcode = IB_WR_RDMA_WRITE;
+	cb->rdma_sq_wr.rkey = cb->remote_rkey;
+	cb->rdma_sq_wr.remote_addr = cb->remote_addr;
+	cb->rdma_sq_wr.wr.sg_list->length = cb->size;
 
 	if (cycle_iters > iters)
 		cycle_iters = iters;
@@ -1388,7 +1210,7 @@ static void bw_test(struct krping_cb *cb)
 
 			if (scnt < cycle_iters)
 				post_cycles_start[scnt] = get_cycles();
-			if (ib_post_send(cb->qp, &cb->rdma_sq_wr, &bad_wr)) {
+			if (ib_post_send(cb->qp, &cb->rdma_sq_wr.wr, &bad_wr)) {
 				printk(KERN_ERR PFX  
 					"Couldn't post send: scnt=%d\n",
 					scnt);
@@ -1559,24 +1381,19 @@ static void krping_bw_test_server(struct krping_cb *cb)
 	wait_event_interruptible(cb->sem, cb->state == ERROR);
 }
 
-static int fastreg_supported(struct ib_device *dev)
+static int reg_supported(struct ib_device *dev)
 {
-	struct ib_device_attr attr;
-	int ret;
+	u64 needed_flags = IB_DEVICE_MEM_MGT_EXTENSIONS |
+			   IB_DEVICE_LOCAL_DMA_LKEY;
 
-	ret = ib_query_device(dev, &attr);
-	if (ret) {
-		printk(KERN_ERR PFX "ib_query_device failed ret %d\n", ret);
-		return 0;
-	}
-	if (!(attr.device_cap_flags & IB_DEVICE_MEM_MGT_EXTENSIONS)) {
+	if ((dev->attrs.device_cap_flags & needed_flags) != needed_flags) {
 		printk(KERN_ERR PFX 
-			"Fastreg not supported - device_cap_flags 0x%x\n",
-			attr.device_cap_flags);
+			"Fastreg not supported - device_cap_flags 0x%llx\n",
+			(u64)dev->attrs.device_cap_flags);
 		return 0;
 	}
-	DEBUG_LOG("Fastreg supported - device_cap_flags 0x%x\n",
-		attr.device_cap_flags);
+	DEBUG_LOG("Fastreg/local_dma_lkey supported - device_cap_flags 0x%llx\n",
+		(u64)dev->attrs.device_cap_flags);
 	return 1;
 }
 
@@ -1626,7 +1443,7 @@ static int krping_bind_server(struct krping_cb *cb)
 		return -1;
 	}
 
-	if (cb->mem == FASTREG && !fastreg_supported(cb->child_cm_id->device))
+	if (cb->mem == REG && !reg_supported(cb->child_cm_id->device))
 		return -EINVAL;
 
 	return 0;
@@ -1803,15 +1620,15 @@ static void krping_rlat_test_client(struct krping_cb *cb)
 	struct ib_send_wr *bad_wr;
 	int ne;
 	
-	cb->rdma_sq_wr.opcode = IB_WR_RDMA_WRITE;
-	cb->rdma_sq_wr.wr.rdma.rkey = cb->remote_rkey;
-	cb->rdma_sq_wr.wr.rdma.remote_addr = cb->remote_addr;
-	cb->rdma_sq_wr.sg_list->length = 0;
-	cb->rdma_sq_wr.num_sge = 0;
+	cb->rdma_sq_wr.wr.opcode = IB_WR_RDMA_WRITE;
+	cb->rdma_sq_wr.rkey = cb->remote_rkey;
+	cb->rdma_sq_wr.remote_addr = cb->remote_addr;
+	cb->rdma_sq_wr.wr.sg_list->length = 0;
+	cb->rdma_sq_wr.wr.num_sge = 0;
 
 	do_gettimeofday(&start);
 	for (i=0; i < 100000; i++) {
-		if (ib_post_send(cb->qp, &cb->rdma_sq_wr, &bad_wr)) {
+		if (ib_post_send(cb->qp, &cb->rdma_sq_wr.wr, &bad_wr)) {
 			printk(KERN_ERR PFX  "Couldn't post send\n");
 			return;
 		}
@@ -1926,43 +1743,39 @@ static void krping_bw_test_client(struct krping_cb *cb)
 
 static void krping_fr_test(struct krping_cb *cb)
 {
-	struct ib_fast_reg_page_list *pl;
-	struct ib_send_wr fr, inv, *bad;
+	struct ib_send_wr inv, *bad;
+	struct ib_reg_wr fr;
 	struct ib_wc wc;
 	u8 key = 0;
 	struct ib_mr *mr;
-	int i;
 	int ret;
 	int size = cb->size;
 	int plen = (((size - 1) & PAGE_MASK) + PAGE_SIZE) >> PAGE_SHIFT;
 	unsigned long start;
 	int count = 0;
 	int scnt = 0;
+	struct scatterlist sg = {0};
 
-	pl = ib_alloc_fast_reg_page_list(cb->qp->device, plen);
-	if (IS_ERR(pl)) {
-		printk(KERN_ERR PFX "ib_alloc_fast_reg_page_list failed %ld\n", PTR_ERR(pl));
+	mr = ib_alloc_mr(cb->pd, IB_MR_TYPE_MEM_REG, plen);
+	if (IS_ERR(mr)) {
+		printk(KERN_ERR PFX "ib_alloc_mr failed %ld\n", PTR_ERR(mr));
 		return;
 	}
-	
-	mr = ib_alloc_fast_reg_mr(cb->pd, plen);
-	if (IS_ERR(mr)) {
-		printk(KERN_ERR PFX "ib_alloc_fast_reg_mr failed %ld\n", PTR_ERR(pl));
-		goto err1;
+
+	sg_dma_address(&sg) = 0xcafebabe0000UL;
+	sg_dma_len(&sg) = size;
+	ret = ib_map_mr_sg(cb->reg_mr, &sg, 1, NULL, PAGE_SIZE);
+	if (ret <= 0) {
+		printk(KERN_ERR PFX "ib_map_mr_sge err %d\n", ret);
+		goto err2;
 	}
 
-	for (i=0; i<plen; i++)
-		pl->page_list[i] = 0xcafebabe | i;
-	
 	memset(&fr, 0, sizeof fr);
-	fr.opcode = IB_WR_FAST_REG_MR;
-	fr.wr.fast_reg.page_shift = PAGE_SHIFT;
-	fr.wr.fast_reg.length = size;
-	fr.wr.fast_reg.page_list = pl;
-	fr.wr.fast_reg.page_list_len = plen;
-	fr.wr.fast_reg.iova_start = 0;
-	fr.wr.fast_reg.access_flags = IB_ACCESS_REMOTE_WRITE | IB_ACCESS_LOCAL_WRITE;
-	fr.next = &inv;
+	fr.wr.opcode = IB_WR_REG_MR;
+	fr.access = IB_ACCESS_REMOTE_WRITE | IB_ACCESS_LOCAL_WRITE;
+	fr.mr = mr;
+	fr.wr.next = &inv;
+
 	memset(&inv, 0, sizeof inv);
 	inv.opcode = IB_WR_LOCAL_INV;
 	inv.send_flags = IB_SEND_SIGNALED;
@@ -1979,15 +1792,19 @@ static void krping_fr_test(struct krping_cb *cb)
 		}	
 		while (scnt < (cb->txdepth>>1)) {
 			ib_update_fast_reg_key(mr, ++key);
-			fr.wr.fast_reg.rkey = mr->rkey;
+			fr.key = mr->rkey;
 			inv.ex.invalidate_rkey = mr->rkey;
+
 			size = prandom_u32() % cb->size;
 			if (size == 0)
 				size = cb->size;
-			plen = (((size - 1) & PAGE_MASK) + PAGE_SIZE) >> PAGE_SHIFT;
-			fr.wr.fast_reg.length = size;
-			fr.wr.fast_reg.page_list_len = plen;
-			ret = ib_post_send(cb->qp, &fr, &bad);
+			sg.length = size;
+			ret = ib_map_mr_sg(cb->reg_mr, &sg, 1, NULL, PAGE_SIZE);
+			if (ret <= 0) {
+				printk(KERN_ERR PFX "ib_map_mr_sge err %d\n", ret);
+				goto err2;
+			}
+			ret = ib_post_send(cb->qp, &fr.wr, &bad);
 			if (ret) {
 				printk(KERN_ERR PFX "ib_post_send failed %d\n", ret);
 				goto err2;	
@@ -2033,8 +1850,6 @@ err2:
 	} while (ret == 1);
 	DEBUG_LOG("fr_test: done!\n");
 	ib_dereg_mr(mr);
-err1:
-	ib_free_fast_reg_page_list(pl);
 }
 
 static int krping_connect_client(struct krping_cb *cb)
@@ -2084,7 +1899,7 @@ static int krping_bind_client(struct krping_cb *cb)
 		return -EINTR;
 	}
 
-	if (cb->mem == FASTREG && !fastreg_supported(cb->cm_id->device))
+	if (cb->mem == REG && !reg_supported(cb->cm_id->device))
 		return -EINVAL;
 
 	DEBUG_LOG("rdma_resolve_addr - rdma_resolve_route successful\n");
@@ -2153,9 +1968,9 @@ int krping_doit(char *cmd)
 	if (!cb)
 		return -ENOMEM;
 
-	down(&krping_mutex);
+	mutex_lock(&krping_mutex);
 	list_add_tail(&cb->list, &krping_cbs);
-	up(&krping_mutex);
+	mutex_unlock(&krping_mutex);
 
 	cb->server = -1;
 	cb->state = IDLE;
@@ -2238,15 +2053,11 @@ int krping_doit(char *cmd)
 		case 'm':
 			if (!strncmp(optarg, "dma", 3))
 				cb->mem = DMA;
-			else if (!strncmp(optarg, "fastreg", 7))
-				cb->mem = FASTREG;
-			else if (!strncmp(optarg, "mw", 2))
-				cb->mem = MW;
-			else if (!strncmp(optarg, "mr", 2))
-				cb->mem = MR;
+			else if (!strncmp(optarg, "reg", 3))
+				cb->mem = REG;
 			else {
 				printk(KERN_ERR PFX "unknown mem mode %s.  "
-					"Must be dma, fastreg, mw, or mr\n",
+					"Must be dma, or reg\n",
 					optarg);
 				ret = -EINVAL;
 				break;
@@ -2298,25 +2109,25 @@ int krping_doit(char *cmd)
 		goto out;
 	}
 
-	if (cb->server_invalidate && cb->mem != FASTREG) {
-		printk(KERN_ERR PFX "server_invalidate only valid with fastreg mem_mode\n");
+	if (cb->server_invalidate && cb->mem != REG) {
+		printk(KERN_ERR PFX "server_invalidate only valid with reg mem_mode\n");
 		ret = -EINVAL;
 		goto out;
 	}
 
-	if (cb->read_inv && cb->mem != FASTREG) {
-		printk(KERN_ERR PFX "read_inv only valid with fastreg mem_mode\n");
+	if (cb->read_inv && cb->mem != REG) {
+		printk(KERN_ERR PFX "read_inv only valid with reg mem_mode\n");
 		ret = -EINVAL;
 		goto out;
 	}
 
-	if (cb->mem != MR && (cb->wlat || cb->rlat || cb->bw)) {
-		printk(KERN_ERR PFX "wlat, rlat, and bw tests only support mem_mode MR\n");
+	if (cb->wlat || cb->rlat || cb->bw) {
+		printk(KERN_ERR PFX "wlat, rlat, and bw tests only support mem_mode MR - which is no longer supported\n");
 		ret = -EINVAL;
 		goto out;
 	}
 
-	cb->cm_id = rdma_create_id(krping_cma_event_handler, cb, RDMA_PS_TCP, IB_QPT_RC);
+	cb->cm_id = rdma_create_id(&init_net, krping_cma_event_handler, cb, RDMA_PS_TCP, IB_QPT_RC);
 	if (IS_ERR(cb->cm_id)) {
 		ret = PTR_ERR(cb->cm_id);
 		printk(KERN_ERR PFX "rdma_create_id error %d\n", ret);
@@ -2332,9 +2143,9 @@ int krping_doit(char *cmd)
 	DEBUG_LOG("destroy cm_id %p\n", cb->cm_id);
 	rdma_destroy_id(cb->cm_id);
 out:
-	down(&krping_mutex);
+	mutex_lock(&krping_mutex);
 	list_del(&cb->list);
-	up(&krping_mutex);
+	mutex_unlock(&krping_mutex);
 	kfree(cb);
 	return ret;
 }
@@ -2342,22 +2153,18 @@ out:
 /*
  * Read proc returns stats for each device.
  */
-static int krping_read_proc(char *page, char **start, off_t off, int count,
-			    int *eof, void *data)
+static int krping_read_proc(struct seq_file *seq, void *v)
 {
 	struct krping_cb *cb;
-	int cc = 0;
-	char *cp = page;
 	int num = 1;
 
 	if (!try_module_get(THIS_MODULE))
 		return -ENODEV;
 	DEBUG_LOG(KERN_INFO PFX "proc read called...\n");
-	*cp = 0;
-	down(&krping_mutex);
+	mutex_lock(&krping_mutex);
 	list_for_each_entry(cb, &krping_cbs, list) {
 		if (cb->pd) {
-			cc = sprintf(cp,
+			seq_printf(seq,
 			     "%d-%s %lld %lld %lld %lld %lld %lld %lld %lld\n",
 			     num++, cb->pd->device->name, cb->stats.send_bytes,
 			     cb->stats.send_msgs, cb->stats.recv_bytes,
@@ -2366,21 +2173,19 @@ static int krping_read_proc(char *page, char **start, off_t off, int count,
 			     cb->stats.read_bytes,
 			     cb->stats.read_msgs);
 		} else {
-			cc = sprintf(cp, "%d listen\n", num++);
+			seq_printf(seq, "%d listen\n", num++);
 		}
-		cp += cc;
 	}
-	up(&krping_mutex);
-	*eof = 1;
+	mutex_unlock(&krping_mutex);
 	module_put(THIS_MODULE);
-	return strlen(page);
+	return 0;
 }
 
 /*
  * Write proc is used to start a ping client or server.
  */
-static int krping_write_proc(struct file *file, const char *buffer,
-			     unsigned long count, void *data)
+static ssize_t krping_write_proc(struct file * file, const char __user * buffer,
+		size_t count, loff_t *ppos)
 {
 	char *cmd;
 	int rc;
@@ -2411,10 +2216,18 @@ static int krping_write_proc(struct file *file, const char *buffer,
 		return (int) count;
 }
 
-struct file_operations krping_ops = {
+static int krping_read_open(struct inode *inode, struct file *file)
+{
+        return single_open(file, krping_read_proc, inode->i_private);
+}
+
+static struct file_operations krping_ops = {
 	.owner = THIS_MODULE,
-	.read = krping_read_proc,
-	.write = krping_write_proc
+	.open = krping_read_open,
+	.read = seq_read,
+	.llseek  = seq_lseek,
+	.release = single_release,
+	.write = krping_write_proc,
 };
 
 static int __init krping_init(void)
