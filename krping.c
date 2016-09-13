@@ -1764,7 +1764,7 @@ static void krping_fr_test(struct krping_cb *cb)
 
 	sg_dma_address(&sg) = 0xcafebabe0000UL;
 	sg_dma_len(&sg) = size;
-	ret = ib_map_mr_sg(cb->reg_mr, &sg, 1, NULL, PAGE_SIZE);
+	ret = ib_map_mr_sg(mr, &sg, 1, NULL, PAGE_SIZE);
 	if (ret <= 0) {
 		printk(KERN_ERR PFX "ib_map_mr_sge err %d\n", ret);
 		goto err2;
@@ -1799,7 +1799,7 @@ static void krping_fr_test(struct krping_cb *cb)
 			if (size == 0)
 				size = cb->size;
 			sg.length = size;
-			ret = ib_map_mr_sg(cb->reg_mr, &sg, 1, NULL, PAGE_SIZE);
+			ret = ib_map_mr_sg(mr, &sg, 1, NULL, PAGE_SIZE);
 			if (ret <= 0) {
 				printk(KERN_ERR PFX "ib_map_mr_sge err %d\n", ret);
 				goto err2;
