@@ -1798,7 +1798,7 @@ static void krping_fr_test(struct krping_cb *cb)
 			size = prandom_u32() % cb->size;
 			if (size == 0)
 				size = cb->size;
-			sg.length = size;
+			sg_dma_len(&sg) = size;
 			ret = ib_map_mr_sg(mr, &sg, 1, NULL, PAGE_SIZE);
 			if (ret <= 0) {
 				printk(KERN_ERR PFX "ib_map_mr_sge err %d\n", ret);
