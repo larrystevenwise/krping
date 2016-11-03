@@ -68,11 +68,6 @@ MODULE_AUTHOR("Steve Wise");
 MODULE_DESCRIPTION("RDMA ping server");
 MODULE_LICENSE("Dual BSD/GPL");
 
-enum mem_type {
-	DMA = 1,
-	REG = 2,
-};
-
 static const struct krping_option krping_opts[] = {
 	{"count", OPT_INT, 'C'},
 	{"size", OPT_INT, 'S'},
@@ -83,7 +78,6 @@ static const struct krping_option krping_opts[] = {
 	{"validate", OPT_NOPARAM, 'V'},
 	{"server", OPT_NOPARAM, 's'},
 	{"client", OPT_NOPARAM, 'c'},
-	{"mem_mode", OPT_STRING, 'm'},
 	{"server_inv", OPT_NOPARAM, 'I'},
  	{"wlat", OPT_NOPARAM, 'l'},
  	{"rlat", OPT_NOPARAM, 'L'},
@@ -181,7 +175,6 @@ struct krping_cb {
 	struct ib_pd *pd;
 	struct ib_qp *qp;
 
-	enum mem_type mem;
 	struct ib_mr *dma_mr;
 
 	struct ib_fast_reg_page_list *page_list;
@@ -503,23 +496,16 @@ static void krping_setup_wr(struct krping_cb *cb)
 		cb->rdma_sq_wr.wr.num_sge = 1;
 	}
 
-	switch(cb->mem) {
-	case REG:
+	/* 
+	 * A chain of 2 WRs, INVALDATE_MR + REG_MR.
+	 * both unsignaled.  The client uses them to reregister
+	 * the rdma buffers with a new key each iteration.
+	 */
+	cb->reg_mr_wr.wr.opcode = IB_WR_REG_MR;
+	cb->reg_mr_wr.mr = cb->reg_mr;
 
-		/* 
-		 * A chain of 2 WRs, INVALDATE_MR + REG_MR.
-		 * both unsignaled.  The client uses them to reregister
-		 * the rdma buffers with a new key each iteration.
-		 */
-		cb->reg_mr_wr.wr.opcode = IB_WR_REG_MR;
-		cb->reg_mr_wr.mr = cb->reg_mr;
-
-		cb->invalidate_wr.next = &cb->reg_mr_wr.wr;
-		cb->invalidate_wr.opcode = IB_WR_LOCAL_INV;
-		break;
-	default:
-		break;
-	}
+	cb->invalidate_wr.next = &cb->reg_mr_wr.wr;
+	cb->invalidate_wr.opcode = IB_WR_LOCAL_INV;
 }
 
 static int krping_setup_buffers(struct krping_cb *cb)
@@ -537,17 +523,6 @@ static int krping_setup_buffers(struct krping_cb *cb)
 					   DMA_BIDIRECTIONAL);
 	pci_unmap_addr_set(cb, send_mapping, cb->send_dma_addr);
 
-	if (cb->mem == DMA) {
-		cb->dma_mr = ib_get_dma_mr(cb->pd, IB_ACCESS_LOCAL_WRITE|
-					   IB_ACCESS_REMOTE_READ|
-				           IB_ACCESS_REMOTE_WRITE);
-		if (IS_ERR(cb->dma_mr)) {
-			DEBUG_LOG(PFX "reg_dmamr failed\n");
-			ret = PTR_ERR(cb->dma_mr);
-			goto bail;
-		}
-	}
-
 	cb->rdma_buf = kmalloc(cb->size, GFP_KERNEL);
 	if (!cb->rdma_buf) {
 		DEBUG_LOG(PFX "rdma_buf malloc failed\n");
@@ -559,19 +534,17 @@ static int krping_setup_buffers(struct krping_cb *cb)
 			       cb->rdma_buf, cb->size, 
 			       DMA_BIDIRECTIONAL);
 	pci_unmap_addr_set(cb, rdma_mapping, cb->rdma_dma_addr);
-	if (cb->mem == REG) {
-		cb->page_list_len = (((cb->size - 1) & PAGE_MASK) + PAGE_SIZE)
-					>> PAGE_SHIFT;
-		cb->reg_mr = ib_alloc_mr(cb->pd,  IB_MR_TYPE_MEM_REG,
-					 cb->page_list_len);
-		if (IS_ERR(cb->reg_mr)) {
-			ret = PTR_ERR(cb->reg_mr);
-			DEBUG_LOG(PFX "recv_buf reg_mr failed %d\n", ret);
-			goto bail;
-		}
-		DEBUG_LOG(PFX "reg rkey 0x%x page_list_len %u\n",
-			cb->reg_mr->rkey, cb->page_list_len);
+	cb->page_list_len = (((cb->size - 1) & PAGE_MASK) + PAGE_SIZE)
+				>> PAGE_SHIFT;
+	cb->reg_mr = ib_alloc_mr(cb->pd,  IB_MR_TYPE_MEM_REG,
+				 cb->page_list_len);
+	if (IS_ERR(cb->reg_mr)) {
+		ret = PTR_ERR(cb->reg_mr);
+		DEBUG_LOG(PFX "recv_buf reg_mr failed %d\n", ret);
+		goto bail;
 	}
+	DEBUG_LOG(PFX "reg rkey 0x%x page_list_len %u\n",
+		cb->reg_mr->rkey, cb->page_list_len);
 
 	if (!cb->server || cb->wlat || cb->rlat || cb->bw) {
 
@@ -676,7 +649,7 @@ static int krping_setup_qp(struct krping_cb *cb, struct rdma_cm_id *cm_id)
 	int ret;
 	struct ib_cq_init_attr attr = {0};
 
-	cb->pd = ib_alloc_pd(cm_id->device);
+	cb->pd = ib_alloc_pd(cm_id->device, 0);
 	if (IS_ERR(cb->pd)) {
 		printk(KERN_ERR PFX "ib_alloc_pd failed\n");
 		return PTR_ERR(cb->pd);
@@ -728,47 +701,44 @@ static u32 krping_rdma_rkey(struct krping_cb *cb, u64 buf, int post_inv)
 	int ret;
 	struct scatterlist sg = {0};
 
-	if (cb->mem == REG) {
-		cb->invalidate_wr.ex.invalidate_rkey = cb->reg_mr->rkey;
+	cb->invalidate_wr.ex.invalidate_rkey = cb->reg_mr->rkey;
 
-		/*
-		 * Update the reg key.
-		 */
-		ib_update_fast_reg_key(cb->reg_mr, ++cb->key);
-		cb->reg_mr_wr.key = cb->reg_mr->rkey;
+	/*
+	 * Update the reg key.
+	 */
+	ib_update_fast_reg_key(cb->reg_mr, ++cb->key);
+	cb->reg_mr_wr.key = cb->reg_mr->rkey;
 
-		/*
-		 * Update the reg WR with new buf info.
-		 */
-		if (buf == (u64)cb->start_dma_addr)
-			cb->reg_mr_wr.access = IB_ACCESS_REMOTE_READ;
-		else
-			cb->reg_mr_wr.access = IB_ACCESS_REMOTE_WRITE | IB_ACCESS_LOCAL_WRITE;
-		sg_dma_address(&sg) = buf;
-		sg_dma_len(&sg) = cb->size;
+	/*
+	 * Update the reg WR with new buf info.
+	 */
+	if (buf == (u64)cb->start_dma_addr)
+		cb->reg_mr_wr.access = IB_ACCESS_REMOTE_READ;
+	else
+		cb->reg_mr_wr.access = IB_ACCESS_REMOTE_WRITE | IB_ACCESS_LOCAL_WRITE;
+	sg_dma_address(&sg) = buf;
+	sg_dma_len(&sg) = cb->size;
 
-		ret = ib_map_mr_sg(cb->reg_mr, &sg, 1, NULL, PAGE_SIZE);
-		BUG_ON(ret <= 0 || ret > cb->page_list_len);
+	ret = ib_map_mr_sg(cb->reg_mr, &sg, 1, NULL, PAGE_SIZE);
+	BUG_ON(ret <= 0 || ret > cb->page_list_len);
 
-		DEBUG_LOG(PFX "post_inv = %d, reg_mr new rkey 0x%x pgsz %u len %u"
-			" iova_start %llx\n",
-			post_inv,
-			cb->reg_mr_wr.key,
-			cb->reg_mr->page_size,
-			cb->reg_mr->length,
-			cb->reg_mr->iova);
+	DEBUG_LOG(PFX "post_inv = %d, reg_mr new rkey 0x%x pgsz %u len %u"
+		" iova_start %llx\n",
+		post_inv,
+		cb->reg_mr_wr.key,
+		cb->reg_mr->page_size,
+		cb->reg_mr->length,
+		cb->reg_mr->iova);
 
-		if (post_inv)
-			ret = ib_post_send(cb->qp, &cb->invalidate_wr, &bad_wr);
-		else
-			ret = ib_post_send(cb->qp, &cb->reg_mr_wr.wr, &bad_wr);
-		if (ret) {
-			printk(KERN_ERR PFX "post send error %d\n", ret);
-			cb->state = ERROR;
-		}
-		rkey = cb->reg_mr->rkey;
-	} else
-		rkey = cb->dma_mr->rkey;
+	if (post_inv)
+		ret = ib_post_send(cb->qp, &cb->invalidate_wr, &bad_wr);
+	else
+		ret = ib_post_send(cb->qp, &cb->reg_mr_wr.wr, &bad_wr);
+	if (ret) {
+		printk(KERN_ERR PFX "post send error %d\n", ret);
+		cb->state = ERROR;
+	}
+	rkey = cb->reg_mr->rkey;
 	return rkey;
 }
 
@@ -820,17 +790,15 @@ static void krping_test_server(struct krping_cb *cb)
 		else {
 
 			cb->rdma_sq_wr.wr.opcode = IB_WR_RDMA_READ;
-			if (cb->mem == REG) {
-				/* 
-				 * Immediately follow the read with a 
-				 * fenced LOCAL_INV.
-				 */
-				cb->rdma_sq_wr.wr.next = &inv;
-				memset(&inv, 0, sizeof inv);
-				inv.opcode = IB_WR_LOCAL_INV;
-				inv.ex.invalidate_rkey = cb->reg_mr->rkey;
-				inv.send_flags = IB_SEND_FENCE;
-			}
+			/* 
+			 * Immediately follow the read with a 
+			 * fenced LOCAL_INV.
+			 */
+			cb->rdma_sq_wr.wr.next = &inv;
+			memset(&inv, 0, sizeof inv);
+			inv.opcode = IB_WR_LOCAL_INV;
+			inv.ex.invalidate_rkey = cb->reg_mr->rkey;
+			inv.send_flags = IB_SEND_FENCE;
 		}
 
 		ret = ib_post_send(cb->qp, &cb->rdma_sq_wr.wr, &bad_wr);
@@ -1443,7 +1411,7 @@ static int krping_bind_server(struct krping_cb *cb)
 		return -1;
 	}
 
-	if (cb->mem == REG && !reg_supported(cb->child_cm_id->device))
+	if (!reg_supported(cb->child_cm_id->device))
 		return -EINVAL;
 
 	return 0;
@@ -1899,7 +1867,7 @@ static int krping_bind_client(struct krping_cb *cb)
 		return -EINTR;
 	}
 
-	if (cb->mem == REG && !reg_supported(cb->cm_id->device))
+	if (!reg_supported(cb->cm_id->device))
 		return -EINVAL;
 
 	DEBUG_LOG("rdma_resolve_addr - rdma_resolve_route successful\n");
@@ -1976,7 +1944,6 @@ int krping_doit(char *cmd)
 	cb->state = IDLE;
 	cb->size = 64;
 	cb->txdepth = RPING_SQ_DEPTH;
-	cb->mem = DMA;
 	init_waitqueue_head(&cb->sem);
 
 	while ((op = krping_getopt("krping", &cmd, krping_opts, NULL, &optarg,
@@ -2050,19 +2017,6 @@ int krping_doit(char *cmd)
 		case 'd':
 			cb->duplex++;
 			break;
-		case 'm':
-			if (!strncmp(optarg, "dma", 3))
-				cb->mem = DMA;
-			else if (!strncmp(optarg, "reg", 3))
-				cb->mem = REG;
-			else {
-				printk(KERN_ERR PFX "unknown mem mode %s.  "
-					"Must be dma, or reg\n",
-					optarg);
-				ret = -EINVAL;
-				break;
-			}
-			break;
 		case 'I':
 			cb->server_invalidate = 1;
 			break;
@@ -2105,18 +2059,6 @@ int krping_doit(char *cmd)
 
 	if ((cb->frtest + cb->bw + cb->rlat + cb->wlat) > 1) {
 		printk(KERN_ERR PFX "Pick only one test: fr, bw, rlat, wlat\n");
-		ret = -EINVAL;
-		goto out;
-	}
-
-	if (cb->server_invalidate && cb->mem != REG) {
-		printk(KERN_ERR PFX "server_invalidate only valid with reg mem_mode\n");
-		ret = -EINVAL;
-		goto out;
-	}
-
-	if (cb->read_inv && cb->mem != REG) {
-		printk(KERN_ERR PFX "read_inv only valid with reg mem_mode\n");
 		ret = -EINVAL;
 		goto out;
 	}
