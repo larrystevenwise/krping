@@ -781,7 +781,7 @@ static void krping_test_server(struct krping_cb *cb)
 		cb->rdma_sq_wr.rkey = cb->remote_rkey;
 		cb->rdma_sq_wr.remote_addr = cb->remote_addr;
 		cb->rdma_sq_wr.wr.sg_list->length = cb->remote_len;
-		cb->rdma_sgl.lkey = krping_rdma_rkey(cb, cb->rdma_dma_addr, 1);
+		cb->rdma_sgl.lkey = krping_rdma_rkey(cb, cb->rdma_dma_addr, !cb->read_inv);
 		cb->rdma_sq_wr.wr.next = NULL;
 
 		/* Issue RDMA Read. */
