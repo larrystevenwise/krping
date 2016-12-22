@@ -617,6 +617,11 @@ static int krping_create_qp(struct krping_cb *cb)
 	memset(&init_attr, 0, sizeof(init_attr));
 	init_attr.cap.max_send_wr = cb->txdepth;
 	init_attr.cap.max_recv_wr = 2;
+	
+	/* For flush_qp() */
+	init_attr.cap.max_send_wr++;
+	init_attr.cap.max_recv_wr++;
+
 	init_attr.cap.max_recv_sge = 1;
 	init_attr.cap.max_send_sge = 1;
 	init_attr.qp_type = IB_QPT_RC;
@@ -1709,6 +1714,53 @@ static void krping_bw_test_client(struct krping_cb *cb)
 	bw_test(cb);
 }
 
+/*
+ * Manual qp flush test
+ */
+static void flush_qp(struct krping_cb *cb)
+{
+	struct ib_send_wr wr = { 0 }, *bad;
+	struct ib_recv_wr recv_wr = { 0 }, *recv_bad;
+	struct ib_wc wc;
+	int ret;
+	int flushed = 0;
+	int ccnt = 0;
+
+	rdma_disconnect(cb->cm_id);
+	DEBUG_LOG("disconnected!\n");
+
+	wr.opcode = IB_WR_SEND;
+	wr.wr_id = 0xdeadbeefcafebabe;
+	ret = ib_post_send(cb->qp, &wr, &bad);
+	if (ret) {
+		printk(KERN_ERR PFX "%s post_send failed ret %d\n", __func__, ret);
+		return;
+	}
+
+	recv_wr.wr_id = 0xcafebabedeadbeef;
+	ret = ib_post_recv(cb->qp, &recv_wr, &recv_bad);
+	if (ret) {
+		printk(KERN_ERR PFX "%s post_recv failed ret %d\n", __func__, ret);
+		return;
+	}
+
+	/* poll until the flush WRs complete */
+	do {
+		ret = ib_poll_cq(cb->cq, 1, &wc);
+		if (ret < 0) {
+			printk(KERN_ERR PFX "ib_poll_cq failed %d\n", ret);
+			return;
+		}
+		if (ret == 0)
+			continue;
+		ccnt++;
+		if (wc.wr_id == 0xdeadbeefcafebabe ||
+		    wc.wr_id == 0xcafebabedeadbeef)
+			flushed++;
+	} while (flushed != 2);
+	DEBUG_LOG("qp_flushed! ccnt %u\n", ccnt);
+}
+
 static void krping_fr_test(struct krping_cb *cb)
 {
 	struct ib_send_wr inv, *bad;
@@ -1750,7 +1802,11 @@ static void krping_fr_test(struct krping_cb *cb)
 	
 	DEBUG_LOG("fr_test: stag index 0x%x plen %u size %u depth %u\n", mr->rkey >> 8, plen, cb->size, cb->txdepth);
 	start = get_seconds();
-	while (1) {
+	while (!cb->count || count <= cb->count) {
+		if (signal_pending(current)) {
+			printk(KERN_ERR PFX "signal!\n");
+			break;
+		}
 		if ((get_seconds() - start) >= 9) {
 			DEBUG_LOG("fr_test: pausing 1 second! count %u latest size %u plen %u\n", count, size, plen);
 			wait_event_interruptible_timeout(cb->sem, cb->state == ERROR, HZ);
@@ -1780,42 +1836,22 @@ static void krping_fr_test(struct krping_cb *cb)
 			scnt++;
 		}
 
-		do {
-			ret = ib_poll_cq(cb->cq, 1, &wc);
-			if (ret < 0) {
-				printk(KERN_ERR PFX "ib_poll_cq failed %d\n", ret);
-				goto err2;	
-			}
-			if (ret == 1) {
-				if (wc.status) {
-					printk(KERN_ERR PFX "completion error %u\n", wc.status);
-					goto err2;
-				}
-				count++;
-				scnt--;
-			}
-			else if (signal_pending(current)) {
-				printk(KERN_ERR PFX "signal!\n");
-				goto err2;
-			}
-		} while (ret == 1);
-	}
-err2:
-	DEBUG_LOG("sleeping 1 second\n");
-	wait_event_interruptible_timeout(cb->sem, cb->state == ERROR, HZ);
-	DEBUG_LOG("draining the cq...\n");
-	do {
 		ret = ib_poll_cq(cb->cq, 1, &wc);
 		if (ret < 0) {
 			printk(KERN_ERR PFX "ib_poll_cq failed %d\n", ret);
-			break;
+			goto err2;	
 		}
 		if (ret == 1) {
 			if (wc.status) {
-				printk(KERN_ERR PFX "completion error %u opcode %u\n", wc.status, wc.opcode);
+				printk(KERN_ERR PFX "completion error %u\n", wc.status);
+				goto err2;
 			}
+			count++;
+			scnt--;
 		}
-	} while (ret == 1);
+	}
+err2:
+	flush_qp(cb);
 	DEBUG_LOG("fr_test: done!\n");
 	ib_dereg_mr(mr);
 }
