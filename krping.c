@@ -476,13 +476,13 @@ static void krping_setup_wr(struct krping_cb *cb)
 {
 	cb->recv_sgl.addr = cb->recv_dma_addr;
 	cb->recv_sgl.length = sizeof cb->recv_buf;
-	cb->recv_sgl.lkey = cb->qp->device->local_dma_lkey;
+	cb->recv_sgl.lkey = cb->pd->local_dma_lkey;
 	cb->rq_wr.sg_list = &cb->recv_sgl;
 	cb->rq_wr.num_sge = 1;
 
 	cb->send_sgl.addr = cb->send_dma_addr;
 	cb->send_sgl.length = sizeof cb->send_buf;
-	cb->send_sgl.lkey = cb->qp->device->local_dma_lkey;
+	cb->send_sgl.lkey = cb->pd->local_dma_lkey;
 
 	cb->sq_wr.opcode = IB_WR_SEND;
 	cb->sq_wr.send_flags = IB_SEND_SIGNALED;
@@ -860,7 +860,7 @@ static void krping_test_server(struct krping_cb *cb)
 		cb->rdma_sq_wr.remote_addr = cb->remote_addr;
 		cb->rdma_sq_wr.wr.sg_list->length = strlen(cb->rdma_buf) + 1;
 		if (cb->local_dma_lkey)
-			cb->rdma_sgl.lkey = cb->qp->device->local_dma_lkey;
+			cb->rdma_sgl.lkey = cb->pd->local_dma_lkey;
 		else 
 			cb->rdma_sgl.lkey = krping_rdma_rkey(cb, cb->rdma_dma_addr, 0);
 			
@@ -1356,8 +1356,7 @@ static void krping_bw_test_server(struct krping_cb *cb)
 
 static int reg_supported(struct ib_device *dev)
 {
-	u64 needed_flags = IB_DEVICE_MEM_MGT_EXTENSIONS |
-			   IB_DEVICE_LOCAL_DMA_LKEY;
+	u64 needed_flags = IB_DEVICE_MEM_MGT_EXTENSIONS;
 
 	if ((dev->attrs.device_cap_flags & needed_flags) != needed_flags) {
 		printk(KERN_ERR PFX 
@@ -1365,7 +1364,7 @@ static int reg_supported(struct ib_device *dev)
 			(u64)dev->attrs.device_cap_flags);
 		return 0;
 	}
-	DEBUG_LOG("Fastreg/local_dma_lkey supported - device_cap_flags 0x%llx\n",
+	DEBUG_LOG("Fastreg supported - device_cap_flags 0x%llx\n",
 		(u64)dev->attrs.device_cap_flags);
 	return 1;
 }
