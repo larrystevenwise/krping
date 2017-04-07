@@ -138,7 +138,7 @@ static struct proc_dir_entry *krping_proc;
  * These states are used to signal events between the completion handler
  * and the main client or server thread.
  *
- * Once CONNECTED, they cycle through RDMA_READ_ADV, RDMA_WRITE_ADV, 
+ * Once CONNECTED, they cycle through RDMA_READ_ADV, RDMA_WRITE_ADV,
  * and RDMA_WRITE_COMPLETE for each ping.
  */
 enum test_state {
@@ -188,13 +188,13 @@ struct krping_cb {
 
 	struct ib_recv_wr rq_wr;	/* recv work request record */
 	struct ib_sge recv_sgl;		/* recv single SGE */
-	struct krping_rdma_info recv_buf;/* malloc'd buffer */
+	struct krping_rdma_info recv_buf __aligned(16);	/* malloc'd buffer */
 	u64 recv_dma_addr;
 	DECLARE_PCI_UNMAP_ADDR(recv_mapping)
 
 	struct ib_send_wr sq_wr;	/* send work requrest record */
 	struct ib_sge send_sgl;
-	struct krping_rdma_info send_buf;/* single send buf */
+	struct krping_rdma_info send_buf __aligned(16); /* single send buf */
 	u64 send_dma_addr;
 	DECLARE_PCI_UNMAP_ADDR(send_mapping)
 
@@ -239,7 +239,7 @@ struct krping_cb {
 	struct rdma_cm_id *cm_id;	/* connection on client side,*/
 					/* listener on server side. */
 	struct rdma_cm_id *child_cm_id;	/* connection on server side */
-	struct list_head list;	
+	struct list_head list;
 };
 
 static int krping_cma_event_handler(struct rdma_cm_id *cma_id,
@@ -514,25 +514,23 @@ static int krping_setup_buffers(struct krping_cb *cb)
 
 	DEBUG_LOG(PFX "krping_setup_buffers called on cb %p\n", cb);
 
-	cb->recv_dma_addr = dma_map_single(cb->pd->device->dma_device, 
+	cb->recv_dma_addr = ib_dma_map_single(cb->pd->device,
 				   &cb->recv_buf, 
 				   sizeof(cb->recv_buf), DMA_BIDIRECTIONAL);
 	pci_unmap_addr_set(cb, recv_mapping, cb->recv_dma_addr);
-	cb->send_dma_addr = dma_map_single(cb->pd->device->dma_device, 
+	cb->send_dma_addr = ib_dma_map_single(cb->pd->device,
 					   &cb->send_buf, sizeof(cb->send_buf),
 					   DMA_BIDIRECTIONAL);
 	pci_unmap_addr_set(cb, send_mapping, cb->send_dma_addr);
 
-	cb->rdma_buf = kmalloc(cb->size, GFP_KERNEL);
+	cb->rdma_buf = ib_dma_alloc_coherent(cb->pd->device, cb->size,
+					     &cb->rdma_dma_addr,
+					     GFP_KERNEL);
 	if (!cb->rdma_buf) {
-		DEBUG_LOG(PFX "rdma_buf malloc failed\n");
+		DEBUG_LOG(PFX "rdma_buf allocation failed\n");
 		ret = -ENOMEM;
 		goto bail;
 	}
-
-	cb->rdma_dma_addr = dma_map_single(cb->pd->device->dma_device, 
-			       cb->rdma_buf, cb->size, 
-			       DMA_BIDIRECTIONAL);
 	pci_unmap_addr_set(cb, rdma_mapping, cb->rdma_dma_addr);
 	cb->page_list_len = (((cb->size - 1) & PAGE_MASK) + PAGE_SIZE)
 				>> PAGE_SHIFT;
@@ -548,16 +546,14 @@ static int krping_setup_buffers(struct krping_cb *cb)
 
 	if (!cb->server || cb->wlat || cb->rlat || cb->bw) {
 
-		cb->start_buf = kmalloc(cb->size, GFP_KERNEL);
+		cb->start_buf = ib_dma_alloc_coherent(cb->pd->device, cb->size,
+						      &cb->start_dma_addr,
+						      GFP_KERNEL);
 		if (!cb->start_buf) {
 			DEBUG_LOG(PFX "start_buf malloc failed\n");
 			ret = -ENOMEM;
 			goto bail;
 		}
-
-		cb->start_dma_addr = dma_map_single(cb->pd->device->dma_device, 
-						   cb->start_buf, cb->size, 
-						   DMA_BIDIRECTIONAL);
 		pci_unmap_addr_set(cb, start_mapping, cb->start_dma_addr);
 	}
 
@@ -571,10 +567,14 @@ bail:
 		ib_dereg_mr(cb->rdma_mr);
 	if (cb->dma_mr && !IS_ERR(cb->dma_mr))
 		ib_dereg_mr(cb->dma_mr);
-	if (cb->rdma_buf)
-		kfree(cb->rdma_buf);
-	if (cb->start_buf)
-		kfree(cb->start_buf);
+	if (cb->rdma_buf) {
+		ib_dma_free_coherent(cb->pd->device, cb->size, cb->rdma_buf,
+				     cb->rdma_dma_addr);
+	}
+	if (cb->start_buf) {
+		ib_dma_free_coherent(cb->pd->device, cb->size, cb->start_buf,
+				     cb->start_dma_addr);
+	}
 	return ret;
 }
 
@@ -597,15 +597,13 @@ static void krping_free_buffers(struct krping_cb *cb)
 	dma_unmap_single(cb->pd->device->dma_device,
 			 pci_unmap_addr(cb, send_mapping),
 			 sizeof(cb->send_buf), DMA_BIDIRECTIONAL);
-	dma_unmap_single(cb->pd->device->dma_device,
-			 pci_unmap_addr(cb, rdma_mapping),
-			 cb->size, DMA_BIDIRECTIONAL);
-	kfree(cb->rdma_buf);
+
+	ib_dma_free_coherent(cb->pd->device, cb->size, cb->rdma_buf,
+			     cb->rdma_dma_addr);
+
 	if (cb->start_buf) {
-		dma_unmap_single(cb->pd->device->dma_device,
-			 pci_unmap_addr(cb, start_mapping),
-			 cb->size, DMA_BIDIRECTIONAL);
-		kfree(cb->start_buf);
+		ib_dma_free_coherent(cb->pd->device, cb->size, cb->start_buf,
+				     cb->start_dma_addr);
 	}
 }
 
@@ -733,7 +731,7 @@ static u32 krping_rdma_rkey(struct krping_cb *cb, u64 buf, int post_inv)
 		cb->reg_mr_wr.key,
 		cb->reg_mr->page_size,
 		cb->reg_mr->length,
-		cb->reg_mr->iova);
+		(unsigned long long)cb->reg_mr->iova);
 
 	if (post_inv)
 		ret = ib_post_send(cb->qp, &cb->invalidate_wr, &bad_wr);
@@ -978,8 +976,8 @@ static void rlat_test(struct krping_cb *cb)
         }
 
 	printk(KERN_ERR PFX "delta sec %lu delta usec %lu iter %d size %d\n",
-		stop_tv.tv_sec - start_tv.tv_sec, 
-		stop_tv.tv_usec - start_tv.tv_usec,
+		(unsigned long)(stop_tv.tv_sec - start_tv.tv_sec),
+		(unsigned long)(stop_tv.tv_usec - start_tv.tv_usec),
 		scnt, cb->size);
 }
 
@@ -1115,9 +1113,9 @@ static void wlat_test(struct krping_cb *cb)
 	printk(KERN_ERR PFX 
 		"delta sec %lu delta usec %lu iter %d size %d cycle_iters %d"
 		" sum_post %llu sum_poll %llu sum_last_poll %llu\n",
-		stop_tv.tv_sec - start_tv.tv_sec, 
-		stop_tv.tv_usec - start_tv.tv_usec,
-		scnt, cb->size, cycle_iters, 
+		(unsigned long)(stop_tv.tv_sec - start_tv.tv_sec),
+		(unsigned long)(stop_tv.tv_usec - start_tv.tv_usec),
+		scnt, cb->size, cycle_iters,
 		(unsigned long long)sum_post, (unsigned long long)sum_poll, 
 		(unsigned long long)sum_last_poll);
 	kfree(post_cycles_start);
@@ -1241,8 +1239,8 @@ static void bw_test(struct krping_cb *cb)
 	printk(KERN_ERR PFX 
 		"delta sec %lu delta usec %lu iter %d size %d cycle_iters %d"
 		" sum_post %llu sum_poll %llu sum_last_poll %llu\n",
-		stop_tv.tv_sec - start_tv.tv_sec, 
-		stop_tv.tv_usec - start_tv.tv_usec,
+		(unsigned long)(stop_tv.tv_sec - start_tv.tv_sec),
+		(unsigned long)(stop_tv.tv_usec - start_tv.tv_usec),
 		scnt, cb->size, cycle_iters, 
 		(unsigned long long)sum_post, (unsigned long long)sum_poll, 
 		(unsigned long long)sum_last_poll);
@@ -1362,11 +1360,11 @@ static int reg_supported(struct ib_device *dev)
 	if ((dev->attrs.device_cap_flags & needed_flags) != needed_flags) {
 		printk(KERN_ERR PFX 
 			"Fastreg not supported - device_cap_flags 0x%llx\n",
-			(u64)dev->attrs.device_cap_flags);
+			(unsigned long long)dev->attrs.device_cap_flags);
 		return 0;
 	}
 	DEBUG_LOG("Fastreg supported - device_cap_flags 0x%llx\n",
-		(u64)dev->attrs.device_cap_flags);
+		(unsigned long long)dev->attrs.device_cap_flags);
 	return 1;
 }
 
