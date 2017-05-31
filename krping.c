@@ -51,6 +51,7 @@
 #ifdef CONFIG_P2PMEM
 #include <linux/p2pmem.h>
 #endif
+#include <linux/random.h>
 
 #include <asm/atomic.h>
 #include <asm/pci.h>
@@ -95,6 +96,7 @@ static const struct krping_option krping_opts[] = {
 	{"use_p2pmem", OPT_NOPARAM, 'u'},
 #endif
 	{"offset", OPT_INT, 'o'},
+	{"random", OPT_NOPARAM, 'r'},
 	{NULL, 0, 0}
 };
 
@@ -252,6 +254,7 @@ struct krping_cb {
 	int use_p2pmem;
 #endif
 	int offset;
+	int random;
 };
 
 static int krping_cma_event_handler(struct rdma_cm_id *cma_id,
@@ -735,7 +738,7 @@ err1:
  * REG mode: invalidate and rebind via reg wr.
  * other modes: just return the mr rkey.
  */
-static u32 krping_rdma_rkey(struct krping_cb *cb, u64 buf, int post_inv)
+static u32 krping_rdma_rkey(struct krping_cb *cb, u64 buf, int post_inv, int size)
 {
 	u32 rkey;
 	struct ib_send_wr *bad_wr;
@@ -758,7 +761,7 @@ static u32 krping_rdma_rkey(struct krping_cb *cb, u64 buf, int post_inv)
 	else
 		cb->reg_mr_wr.access = IB_ACCESS_REMOTE_WRITE | IB_ACCESS_LOCAL_WRITE;
 	sg_dma_address(&sg) = buf + cb->offset;
-	sg_dma_len(&sg) = cb->size + cb->offset;
+	sg_dma_len(&sg) = size + cb->offset;
 
 	ret = ib_map_mr_sg(cb->reg_mr, &sg, 1, NULL, PAGE_SIZE);
 	BUG_ON(ret <= 0 || ret > cb->page_list_len);
@@ -783,7 +786,7 @@ static u32 krping_rdma_rkey(struct krping_cb *cb, u64 buf, int post_inv)
 	return rkey;
 }
 
-static void krping_format_send(struct krping_cb *cb, u64 buf)
+static void krping_format_send(struct krping_cb *cb, u64 buf, int size)
 {
 	struct krping_rdma_info *info = &cb->send_buf;
 	u32 rkey;
@@ -794,12 +797,12 @@ static void krping_format_send(struct krping_cb *cb, u64 buf)
 	 * sends have no data.
 	 */
 	if (!cb->server || cb->wlat || cb->rlat || cb->bw) {
-		rkey = krping_rdma_rkey(cb, buf, !cb->server_invalidate);
+		rkey = krping_rdma_rkey(cb, buf, !cb->server_invalidate, size);
 		info->buf = htonll(buf);
 		info->rkey = htonl(rkey);
-		info->size = htonl(cb->size);
+		info->size = htonl(size);
 		DEBUG_LOG("RDMA addr %llx rkey %x len %d\n",
-			  (unsigned long long)buf, rkey, cb->size);
+			  (unsigned long long)buf, rkey, size);
 	}
 }
 
@@ -823,7 +826,7 @@ static void krping_test_server(struct krping_cb *cb)
 		cb->rdma_sq_wr.remote_addr = cb->remote_addr;
 		cb->rdma_sq_wr.wr.sg_list->length = cb->remote_len;
 		cb->rdma_sgl.addr = cb->start_dma_addr + cb->offset;
-		cb->rdma_sgl.lkey = krping_rdma_rkey(cb, cb->start_dma_addr, !cb->read_inv);
+		cb->rdma_sgl.lkey = krping_rdma_rkey(cb, cb->start_dma_addr, !cb->read_inv, cb->size);
 		cb->rdma_sq_wr.wr.next = NULL;
 
 		/* Issue RDMA Read. */
@@ -872,8 +875,8 @@ static void krping_test_server(struct krping_cb *cb)
 		memcpy(cb->rdma_buf, cb->start_buf, cb->size + cb->offset);
 		if (cb->verbose)
 			printk(KERN_INFO PFX
-				"server ping data (64B max): |%.64s|\n",
-				cb->rdma_buf);
+				"server ping data size %6d (64B max): |%.64s|\n",
+				cb->size, cb->rdma_buf);
 
 		/* Tell client to continue */
 		if (cb->server && cb->server_invalidate) {
@@ -907,7 +910,7 @@ static void krping_test_server(struct krping_cb *cb)
 		if (cb->local_dma_lkey)
 			cb->rdma_sgl.lkey = cb->pd->local_dma_lkey;
 		else 
-			cb->rdma_sgl.lkey = krping_rdma_rkey(cb, cb->rdma_dma_addr, 0);
+			cb->rdma_sgl.lkey = krping_rdma_rkey(cb, cb->rdma_dma_addr, 0, cb->size);
 			
 		DEBUG_LOG("rdma write from lkey %x laddr %llx len %d to raddr %llx rkey %x\n",
 			  cb->rdma_sq_wr.wr.sg_list->lkey,
@@ -1310,7 +1313,7 @@ static void krping_rlat_test_server(struct krping_cb *cb)
 	}
 
 	/* Send STAG/TO/Len to client */
-	krping_format_send(cb, cb->start_dma_addr);
+	krping_format_send(cb, cb->start_dma_addr, cb->size);
 	ret = ib_post_send(cb->qp, &cb->sq_wr, &bad_wr);
 	if (ret) {
 		printk(KERN_ERR PFX "post send error %d\n", ret);
@@ -1343,7 +1346,7 @@ static void krping_wlat_test_server(struct krping_cb *cb)
 	}
 
 	/* Send STAG/TO/Len to client */
-	krping_format_send(cb, cb->start_dma_addr);
+	krping_format_send(cb, cb->start_dma_addr, cb->size);
 	ret = ib_post_send(cb->qp, &cb->sq_wr, &bad_wr);
 	if (ret) {
 		printk(KERN_ERR PFX "post send error %d\n", ret);
@@ -1377,7 +1380,7 @@ static void krping_bw_test_server(struct krping_cb *cb)
 	}
 
 	/* Send STAG/TO/Len to client */
-	krping_format_send(cb, cb->start_dma_addr);
+	krping_format_send(cb, cb->start_dma_addr, cb->size);
 	ret = ib_post_send(cb->qp, &cb->sq_wr, &bad_wr);
 	if (ret) {
 		printk(KERN_ERR PFX "post send error %d\n", ret);
@@ -1551,6 +1554,11 @@ err0:
 #endif
 }
 
+static int client_io_size(struct krping_cb *cb)
+{
+	return cb->random ? prandom_u32_max(cb->size) : cb->size;
+}
+
 static void krping_test_client(struct krping_cb *cb)
 {
 	int ping, start, cc, i, ret;
@@ -1559,11 +1567,13 @@ static void krping_test_client(struct krping_cb *cb)
 
 	start = 65;
 	for (ping = 0; !cb->count || ping < cb->count; ping++) {
+		int size = client_io_size(cb);
+
 		cb->state = RDMA_READ_ADV;
 
 		/* Put some ascii text in the buffer. */
-		cc = sprintf(cb->start_buf, "rdma-ping-%d: ", ping);
-		for (i = cc, c = start; i < cb->size; i++) {
+		cc = snprintf(cb->start_buf, size, "rdma-ping-%d: ", ping);
+		for (i = cc, c = start; i < size; i++) {
 			cb->start_buf[i] = c;
 			c++;
 			if (c > 122)
@@ -1572,9 +1582,9 @@ static void krping_test_client(struct krping_cb *cb)
 		start++;
 		if (start > 122)
 			start = 65;
-		cb->start_buf[cb->size - 1] = 0;
+		cb->start_buf[size - 1] = 0;
 
-		krping_format_send(cb, cb->start_dma_addr);
+		krping_format_send(cb, cb->start_dma_addr, size);
 		if (cb->state == ERROR) {
 			printk(KERN_ERR PFX "krping_format_send failed\n");
 			break;
@@ -1594,7 +1604,7 @@ static void krping_test_client(struct krping_cb *cb)
 			break;
 		}
 
-		krping_format_send(cb, cb->rdma_dma_addr);
+		krping_format_send(cb, cb->rdma_dma_addr, size);
 		ret = ib_post_send(cb->qp, &cb->sq_wr, &bad_wr);
 		if (ret) {
 			printk(KERN_ERR PFX "post send error %d\n", ret);
@@ -1612,14 +1622,14 @@ static void krping_test_client(struct krping_cb *cb)
 		}
 
 		if (cb->validate)
-			if (memcmp(cb->start_buf, cb->rdma_buf, cb->size)) {
+			if (memcmp(cb->start_buf, cb->rdma_buf, size)) {
 				printk(KERN_ERR PFX "data mismatch!\n");
 				break;
 			}
 
 		if (cb->verbose)
-			printk(KERN_INFO PFX "ping data (64B max): |%.64s|\n",
-				cb->rdma_buf);
+			printk(KERN_INFO PFX "ping data size %6d (64B max): |%.64s|\n",
+				size, cb->rdma_buf);
 #ifdef SLOW_KRPING
 		wait_event_interruptible_timeout(cb->sem, cb->state == ERROR, HZ);
 #endif
@@ -1635,7 +1645,7 @@ static void krping_rlat_test_client(struct krping_cb *cb)
 	cb->state = RDMA_READ_ADV;
 
 	/* Send STAG/TO/Len to client */
-	krping_format_send(cb, cb->start_dma_addr);
+	krping_format_send(cb, cb->start_dma_addr, cb->size);
 	if (cb->state == ERROR) {
 		printk(KERN_ERR PFX "krping_format_send failed\n");
 		return;
@@ -1725,7 +1735,7 @@ static void krping_wlat_test_client(struct krping_cb *cb)
 	cb->state = RDMA_READ_ADV;
 
 	/* Send STAG/TO/Len to client */
-	krping_format_send(cb, cb->start_dma_addr);
+	krping_format_send(cb, cb->start_dma_addr, cb->size);
 	if (cb->state == ERROR) {
 		printk(KERN_ERR PFX "krping_format_send failed\n");
 		return;
@@ -1764,7 +1774,7 @@ static void krping_bw_test_client(struct krping_cb *cb)
 	cb->state = RDMA_READ_ADV;
 
 	/* Send STAG/TO/Len to client */
-	krping_format_send(cb, cb->start_dma_addr);
+	krping_format_send(cb, cb->start_dma_addr, cb->size);
 	if (cb->state == ERROR) {
 		printk(KERN_ERR PFX "krping_format_send failed\n");
 		return;
@@ -2065,6 +2075,9 @@ int krping_doit(char *cmd)
 	while ((op = krping_getopt("krping", &cmd, krping_opts, NULL, &optarg,
 			      &optint)) != 0) {
 		switch (op) {
+		case 'r':
+			cb->random = 1;
+			break;
 		case 'o':
 			cb->offset = optint;
 			break;
