@@ -48,6 +48,7 @@
 #include <linux/random.h>
 #include <linux/sched/signal.h>
 #include <linux/proc_fs.h>
+#include <linux/p2pmem.h>
 
 #include <asm/atomic.h>
 #include <asm/pci.h>
@@ -88,6 +89,7 @@ static const struct krping_option krping_opts[] = {
  	{"local_dma_lkey", OPT_NOPARAM, 'Z'},
  	{"read_inv", OPT_NOPARAM, 'R'},
  	{"fr", OPT_NOPARAM, 'f'},
+	{"use_p2pmem", OPT_NOPARAM, 'u'},
 	{NULL, 0, 0}
 };
 
@@ -240,6 +242,8 @@ struct krping_cb {
 					/* listener on server side. */
 	struct rdma_cm_id *child_cm_id;	/* connection on server side */
 	struct list_head list;	
+	struct p2pmem_dev *p2pmem;
+	int use_p2pmem;
 };
 
 static int krping_cma_event_handler(struct rdma_cm_id *cma_id,
@@ -508,6 +512,25 @@ static void krping_setup_wr(struct krping_cb *cb)
 	cb->invalidate_wr.opcode = IB_WR_LOCAL_INV;
 }
 
+static void *krping_alloc_rdma_buf(struct krping_cb *cb)
+{
+	void *b;
+
+	if (cb->server && cb->p2pmem)
+		b = p2pmem_alloc(cb->p2pmem, cb->size);
+	else
+		b = kmalloc(cb->size, GFP_KERNEL);
+	return b;
+}
+
+static void krping_free_rdma_buf(struct krping_cb *cb)
+{
+	if (cb->server && cb->p2pmem)
+		p2pmem_free(cb->p2pmem, cb->rdma_buf, cb->size);
+	else
+		kfree(cb->rdma_buf);
+}
+
 static int krping_setup_buffers(struct krping_cb *cb)
 {
 	int ret;
@@ -523,7 +546,7 @@ static int krping_setup_buffers(struct krping_cb *cb)
 					   DMA_BIDIRECTIONAL);
 	pci_unmap_addr_set(cb, send_mapping, cb->send_dma_addr);
 
-	cb->rdma_buf = kmalloc(cb->size, GFP_KERNEL);
+	cb->rdma_buf = krping_alloc_rdma_buf(cb);
 	if (!cb->rdma_buf) {
 		DEBUG_LOG(PFX "rdma_buf malloc failed\n");
 		ret = -ENOMEM;
@@ -533,6 +556,8 @@ static int krping_setup_buffers(struct krping_cb *cb)
 	cb->rdma_dma_addr = dma_map_single(cb->pd->device->dma_device, 
 			       cb->rdma_buf, cb->size, 
 			       DMA_BIDIRECTIONAL);
+	DEBUG_LOG(PFX "rdma_buf %p rdma_dma_addr 0x%llx\n", cb->rdma_buf, cb->rdma_dma_addr);
+
 	pci_unmap_addr_set(cb, rdma_mapping, cb->rdma_dma_addr);
 	cb->page_list_len = (((cb->size - 1) & PAGE_MASK) + PAGE_SIZE)
 				>> PAGE_SHIFT;
@@ -543,23 +568,22 @@ static int krping_setup_buffers(struct krping_cb *cb)
 		DEBUG_LOG(PFX "recv_buf reg_mr failed %d\n", ret);
 		goto bail;
 	}
-	DEBUG_LOG(PFX "reg rkey 0x%x page_list_len %u\n",
+	DEBUG_LOG(PFX "reg_mr rkey 0x%x page_list_len %u\n",
 		cb->reg_mr->rkey, cb->page_list_len);
 
-	if (!cb->server || cb->wlat || cb->rlat || cb->bw) {
-
-		cb->start_buf = kmalloc(cb->size, GFP_KERNEL);
-		if (!cb->start_buf) {
-			DEBUG_LOG(PFX "start_buf malloc failed\n");
-			ret = -ENOMEM;
-			goto bail;
-		}
-
-		cb->start_dma_addr = dma_map_single(cb->pd->device->dma_device, 
-						   cb->start_buf, cb->size, 
-						   DMA_BIDIRECTIONAL);
-		pci_unmap_addr_set(cb, start_mapping, cb->start_dma_addr);
+	cb->start_buf = kmalloc(cb->size, GFP_KERNEL);
+	if (!cb->start_buf) {
+		DEBUG_LOG(PFX "start_buf malloc failed\n");
+		ret = -ENOMEM;
+		goto bail;
 	}
+
+	cb->start_dma_addr = dma_map_single(cb->pd->device->dma_device, 
+					   cb->start_buf, cb->size, 
+					   DMA_BIDIRECTIONAL);
+	pci_unmap_addr_set(cb, start_mapping, cb->start_dma_addr);
+
+	DEBUG_LOG(PFX "start_buf %p start_dma_addr 0x%llx\n", cb->start_buf, cb->start_dma_addr);
 
 	krping_setup_wr(cb);
 	DEBUG_LOG(PFX "allocated & registered buffers...\n");
@@ -572,7 +596,7 @@ bail:
 	if (cb->dma_mr && !IS_ERR(cb->dma_mr))
 		ib_dereg_mr(cb->dma_mr);
 	if (cb->rdma_buf)
-		kfree(cb->rdma_buf);
+		krping_free_rdma_buf(cb);
 	if (cb->start_buf)
 		kfree(cb->start_buf);
 	return ret;
@@ -600,7 +624,7 @@ static void krping_free_buffers(struct krping_cb *cb)
 	dma_unmap_single(cb->pd->device->dma_device,
 			 pci_unmap_addr(cb, rdma_mapping),
 			 cb->size, DMA_BIDIRECTIONAL);
-	kfree(cb->rdma_buf);
+	krping_free_rdma_buf(cb);
 	if (cb->start_buf) {
 		dma_unmap_single(cb->pd->device->dma_device,
 			 pci_unmap_addr(cb, start_mapping),
@@ -717,7 +741,7 @@ static u32 krping_rdma_rkey(struct krping_cb *cb, u64 buf, int post_inv)
 	/*
 	 * Update the reg WR with new buf info.
 	 */
-	if (buf == (u64)cb->start_dma_addr)
+	if (!cb->server && buf == (u64)cb->start_dma_addr)
 		cb->reg_mr_wr.access = IB_ACCESS_REMOTE_READ;
 	else
 		cb->reg_mr_wr.access = IB_ACCESS_REMOTE_WRITE | IB_ACCESS_LOCAL_WRITE;
@@ -786,7 +810,8 @@ static void krping_test_server(struct krping_cb *cb)
 		cb->rdma_sq_wr.rkey = cb->remote_rkey;
 		cb->rdma_sq_wr.remote_addr = cb->remote_addr;
 		cb->rdma_sq_wr.wr.sg_list->length = cb->remote_len;
-		cb->rdma_sgl.lkey = krping_rdma_rkey(cb, cb->rdma_dma_addr, !cb->read_inv);
+		cb->rdma_sgl.addr = cb->start_dma_addr;
+		cb->rdma_sgl.lkey = krping_rdma_rkey(cb, cb->start_dma_addr, !cb->read_inv);
 		cb->rdma_sq_wr.wr.next = NULL;
 
 		/* Issue RDMA Read. */
@@ -827,6 +852,7 @@ static void krping_test_server(struct krping_cb *cb)
 		DEBUG_LOG("server received read complete\n");
 
 		/* Display data in recv buf */
+		memcpy(cb->rdma_buf, cb->start_buf, cb->size);
 		if (cb->verbose)
 			printk(KERN_INFO PFX
 				"server ping data (64B max): |%.64s|\n",
@@ -860,6 +886,7 @@ static void krping_test_server(struct krping_cb *cb)
 		cb->rdma_sq_wr.rkey = cb->remote_rkey;
 		cb->rdma_sq_wr.remote_addr = cb->remote_addr;
 		cb->rdma_sq_wr.wr.sg_list->length = strlen(cb->rdma_buf) + 1;
+		cb->rdma_sgl.addr = cb->rdma_dma_addr;
 		if (cb->local_dma_lkey)
 			cb->rdma_sgl.lkey = cb->pd->local_dma_lkey;
 		else 
@@ -1422,6 +1449,31 @@ static int krping_bind_server(struct krping_cb *cb)
 	return 0;
 }
 
+static void krping_p2pmem_remove(void *context)
+{
+	struct krping_cb *cb = context;
+
+	if (!cb->p2pmem)
+		return;
+
+	DEBUG_LOG("p2p_device %s removing - disconnecting krping connection", dev_name(&cb->p2pmem->dev));
+	rdma_disconnect(cb->child_cm_id);
+}
+
+static void krping_setup_p2pmem(struct krping_cb *cb)
+{
+	struct device *dma_devs[2];
+	dma_devs[0] = cb->child_cm_id->device->dma_device;
+	dma_devs[1] = NULL;
+
+	if (!cb->use_p2pmem)
+		return;
+
+	cb->p2pmem = p2pmem_find_compat(dma_devs, krping_p2pmem_remove, cb);
+	if (cb->p2pmem)
+		DEBUG_LOG("using %s for write source rdma buffer", dev_name(&cb->p2pmem->dev));
+}
+
 static void krping_run_server(struct krping_cb *cb)
 {
 	struct ib_recv_wr *bad_wr;
@@ -1430,6 +1482,8 @@ static void krping_run_server(struct krping_cb *cb)
 	ret = krping_bind_server(cb);
 	if (ret)
 		return;
+
+	krping_setup_p2pmem(cb);
 
 	ret = krping_setup_qp(cb, cb->child_cm_id);
 	if (ret) {
@@ -1470,6 +1524,7 @@ err1:
 	krping_free_qp(cb);
 err0:
 	rdma_destroy_id(cb->child_cm_id);
+	p2pmem_put(cb->p2pmem, cb);
 }
 
 static void krping_test_client(struct krping_cb *cb)
@@ -1986,6 +2041,10 @@ int krping_doit(char *cmd)
 	while ((op = krping_getopt("krping", &cmd, krping_opts, NULL, &optarg,
 			      &optint)) != 0) {
 		switch (op) {
+		case 'u':
+			cb->use_p2pmem = 1;
+			DEBUG_LOG("Using p2pmem for read/writes\n");
+			break;
 		case 'a':
 			cb->addr_str = optarg;
 			in4_pton(optarg, -1, cb->addr, -1, NULL);
