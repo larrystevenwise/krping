@@ -828,7 +828,8 @@ static void krping_test_server(struct krping_cb *cb)
 
 		/* Display data in recv buf */
 		if (cb->verbose)
-			printk(KERN_INFO PFX "server ping data: %s\n", 
+			printk(KERN_INFO PFX
+				"server ping data (64B max): |%.64s|\n",
 				cb->rdma_buf);
 
 		/* Tell client to continue */
@@ -1538,7 +1539,8 @@ static void krping_test_client(struct krping_cb *cb)
 			}
 
 		if (cb->verbose)
-			printk(KERN_INFO PFX "ping data: %s\n", cb->rdma_buf);
+			printk(KERN_INFO PFX "ping data (64B max): |%.64s|\n",
+				cb->rdma_buf);
 #ifdef SLOW_KRPING
 		wait_event_interruptible_timeout(cb->sem, cb->state == ERROR, HZ);
 #endif
