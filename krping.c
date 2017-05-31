@@ -90,6 +90,7 @@ static const struct krping_option krping_opts[] = {
  	{"read_inv", OPT_NOPARAM, 'R'},
  	{"fr", OPT_NOPARAM, 'f'},
 	{"use_p2pmem", OPT_NOPARAM, 'u'},
+	{"offset", OPT_INT, 'o'},
 	{NULL, 0, 0}
 };
 
@@ -244,6 +245,7 @@ struct krping_cb {
 	struct list_head list;	
 	struct p2pmem_dev *p2pmem;
 	int use_p2pmem;
+	int offset;
 };
 
 static int krping_cma_event_handler(struct rdma_cm_id *cma_id,
@@ -517,16 +519,16 @@ static void *krping_alloc_rdma_buf(struct krping_cb *cb)
 	void *b;
 
 	if (cb->server && cb->p2pmem)
-		b = p2pmem_alloc(cb->p2pmem, cb->size);
+		b = p2pmem_alloc(cb->p2pmem, cb->size + cb->offset);
 	else
-		b = kmalloc(cb->size, GFP_KERNEL);
+		b = kmalloc(cb->size + cb->offset, GFP_KERNEL);
 	return b;
 }
 
 static void krping_free_rdma_buf(struct krping_cb *cb)
 {
 	if (cb->server && cb->p2pmem)
-		p2pmem_free(cb->p2pmem, cb->rdma_buf, cb->size);
+		p2pmem_free(cb->p2pmem, cb->rdma_buf, cb->size + cb->offset);
 	else
 		kfree(cb->rdma_buf);
 }
@@ -745,8 +747,8 @@ static u32 krping_rdma_rkey(struct krping_cb *cb, u64 buf, int post_inv)
 		cb->reg_mr_wr.access = IB_ACCESS_REMOTE_READ;
 	else
 		cb->reg_mr_wr.access = IB_ACCESS_REMOTE_WRITE | IB_ACCESS_LOCAL_WRITE;
-	sg_dma_address(&sg) = buf;
-	sg_dma_len(&sg) = cb->size;
+	sg_dma_address(&sg) = buf + cb->offset;
+	sg_dma_len(&sg) = cb->size + cb->offset;
 
 	ret = ib_map_mr_sg(cb->reg_mr, &sg, 1, NULL, PAGE_SIZE);
 	BUG_ON(ret <= 0 || ret > cb->page_list_len);
@@ -810,7 +812,7 @@ static void krping_test_server(struct krping_cb *cb)
 		cb->rdma_sq_wr.rkey = cb->remote_rkey;
 		cb->rdma_sq_wr.remote_addr = cb->remote_addr;
 		cb->rdma_sq_wr.wr.sg_list->length = cb->remote_len;
-		cb->rdma_sgl.addr = cb->start_dma_addr;
+		cb->rdma_sgl.addr = cb->start_dma_addr + cb->offset;
 		cb->rdma_sgl.lkey = krping_rdma_rkey(cb, cb->start_dma_addr, !cb->read_inv);
 		cb->rdma_sq_wr.wr.next = NULL;
 
@@ -839,6 +841,11 @@ static void krping_test_server(struct krping_cb *cb)
 		cb->rdma_sq_wr.wr.next = NULL;
 
 		DEBUG_LOG("server posted rdma read req \n");
+		DEBUG_LOG("rdma read req to lkey %x laddr %llx len %d from raddr %llx rkey %x\n",
+			  cb->rdma_sq_wr.wr.sg_list->lkey,
+			  (unsigned long long)cb->rdma_sq_wr.wr.sg_list->addr,
+			  cb->rdma_sq_wr.wr.sg_list->length, cb->rdma_sq_wr.remote_addr,
+			  cb->rdma_sq_wr.rkey);
 
 		/* Wait for read completion */
 		wait_event_interruptible(cb->sem, 
@@ -852,7 +859,7 @@ static void krping_test_server(struct krping_cb *cb)
 		DEBUG_LOG("server received read complete\n");
 
 		/* Display data in recv buf */
-		memcpy(cb->rdma_buf, cb->start_buf, cb->size);
+		memcpy(cb->rdma_buf, cb->start_buf, cb->size + cb->offset);
 		if (cb->verbose)
 			printk(KERN_INFO PFX
 				"server ping data (64B max): |%.64s|\n",
@@ -885,17 +892,18 @@ static void krping_test_server(struct krping_cb *cb)
 		cb->rdma_sq_wr.wr.opcode = IB_WR_RDMA_WRITE;
 		cb->rdma_sq_wr.rkey = cb->remote_rkey;
 		cb->rdma_sq_wr.remote_addr = cb->remote_addr;
-		cb->rdma_sq_wr.wr.sg_list->length = strlen(cb->rdma_buf) + 1;
-		cb->rdma_sgl.addr = cb->rdma_dma_addr;
+		cb->rdma_sq_wr.wr.sg_list->length = strlen(cb->rdma_buf+cb->offset) + 1;
+		cb->rdma_sgl.addr = cb->rdma_dma_addr + cb->offset;
 		if (cb->local_dma_lkey)
 			cb->rdma_sgl.lkey = cb->pd->local_dma_lkey;
 		else 
 			cb->rdma_sgl.lkey = krping_rdma_rkey(cb, cb->rdma_dma_addr, 0);
 			
-		DEBUG_LOG("rdma write from lkey %x laddr %llx len %d\n",
+		DEBUG_LOG("rdma write from lkey %x laddr %llx len %d to raddr %llx rkey %x\n",
 			  cb->rdma_sq_wr.wr.sg_list->lkey,
 			  (unsigned long long)cb->rdma_sq_wr.wr.sg_list->addr,
-			  cb->rdma_sq_wr.wr.sg_list->length);
+			  cb->rdma_sq_wr.wr.sg_list->length, cb->rdma_sq_wr.remote_addr,
+			  cb->rdma_sq_wr.rkey);
 
 		ret = ib_post_send(cb->qp, &cb->rdma_sq_wr.wr, &bad_wr);
 		if (ret) {
@@ -2041,6 +2049,10 @@ int krping_doit(char *cmd)
 	while ((op = krping_getopt("krping", &cmd, krping_opts, NULL, &optarg,
 			      &optint)) != 0) {
 		switch (op) {
+		case 'o':
+			cb->offset = optint;
+			break;
+
 		case 'u':
 			cb->use_p2pmem = 1;
 			DEBUG_LOG("Using p2pmem for read/writes\n");
@@ -2140,6 +2152,12 @@ int krping_doit(char *cmd)
 	}
 	if (ret)
 		goto out;
+
+	if (cb->offset >= cb->size) {
+		pr_err(PFX "Bogus offset %d or size %d\n", cb->offset, cb->size);
+		ret = -EINVAL;
+		goto out;
+	}
 
 	if (cb->server == -1) {
 		printk(KERN_ERR PFX "must be either client or server\n");
