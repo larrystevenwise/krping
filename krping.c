@@ -1556,7 +1556,10 @@ err0:
 
 static int client_io_size(struct krping_cb *cb)
 {
-	return cb->random ? prandom_u32_max(cb->size) : cb->size;
+	int r = cb->random ? prandom_u32_max(cb->size) : cb->size;
+	if (!r)
+		r = cb->size;
+	return r;
 }
 
 static void krping_test_client(struct krping_cb *cb)
