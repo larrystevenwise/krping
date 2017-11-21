@@ -220,6 +220,7 @@ struct krping_cb {
 
 	uint16_t port;			/* dst port in NBO */
 	u8 addr[16];			/* dst addr in NBO */
+	char ip6_ndev_name[128];	/* IPv6 netdev name */
 	char *addr_str;			/* dst addr string */
 	uint8_t addr_type;		/* ADDR_FAMILY - IPv4/V6 */
 	int verbose;			/* verbose logging */
@@ -1382,6 +1383,15 @@ static void fill_sockaddr(struct sockaddr_storage *sin, struct krping_cb *cb)
 		sin6->sin6_family = AF_INET6;
 		memcpy((void *)&sin6->sin6_addr, cb->addr, 16);
 		sin6->sin6_port = cb->port;
+		if (cb->ip6_ndev_name[0] != 0) {
+			struct net_device *ndev;
+
+			ndev = __dev_get_by_name(&init_net, cb->ip6_ndev_name);
+			if (ndev != NULL) {
+				sin6->sin6_scope_id = ndev->ifindex;
+				dev_put(ndev);
+			}
+		}
 	}
 }
 
@@ -1965,6 +1975,7 @@ int krping_doit(char *cmd)
 	int op;
 	int ret = 0;
 	char *optarg;
+	char *scope;
 	unsigned long optint;
 
 	cb = kzalloc(sizeof(*cb), GFP_KERNEL);
@@ -1992,6 +2003,15 @@ int krping_doit(char *cmd)
 			break;
 		case 'A':
 			cb->addr_str = optarg;
+			scope = strstr(optarg, "%");
+			if (scope != NULL) {
+				*scope++ = 0;
+				strncpy(cb->ip6_ndev_name, scope,
+					sizeof(cb->ip6_ndev_name));
+				/* force zero-termination */
+				cb->ip6_ndev_name[
+				        sizeof(cb->ip6_ndev_name) - 1] = 0;
+			}
 			in6_pton(optarg, -1, cb->addr, -1, NULL);
 			cb->addr_type = AF_INET6;
 			DEBUG_LOG("ipv6addr (%s)\n", optarg);
