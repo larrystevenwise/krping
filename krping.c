@@ -730,7 +730,7 @@ static u32 krping_rdma_rkey(struct krping_cb *cb, u64 buf, int post_inv)
 	ret = ib_map_mr_sg(cb->reg_mr, &sg, 1, NULL, PAGE_SIZE);
 	BUG_ON(ret <= 0 || ret > cb->page_list_len);
 
-	DEBUG_LOG(PFX "post_inv = %d, reg_mr new rkey 0x%x pgsz %u len %llu"
+	DEBUG_LOG(PFX "post_inv = %d, reg_mr new rkey 0x%x pgsz %u len %u"
 		" iova_start %llx\n",
 		post_inv,
 		cb->reg_mr_wr.key,
