@@ -46,7 +46,7 @@
 #include <linux/pci.h>
 #include <linux/time.h>
 #include <linux/random.h>
-#include <linux/sched/signal.h>
+#include <linux/signal.h>
 #include <linux/proc_fs.h>
 
 #include <asm/atomic.h>
