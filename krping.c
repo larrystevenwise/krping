@@ -59,6 +59,21 @@
 
 #define PFX "krping: "
 
+
+/*
+ * The pci api was deprecated and #defined to the equivalent dma api
+ * calls. In some kernels (RHEL7.7+) these #defines are not
+ * present. Do them here if that is the case.
+ */
+
+#ifndef pci_unmap_addr
+
+#define DECLARE_PCI_UNMAP_ADDR(ADDR_NAME) DEFINE_DMA_UNMAP_ADDR(ADDR_NAME);
+#define DECLARE_PCI_UNMAP_LEN(LEN_NAME)   DEFINE_DMA_UNMAP_LEN(LEN_NAME);
+#define pci_unmap_addr             dma_unmap_addr
+#define pci_unmap_addr_set         dma_unmap_addr_set
+
+#endif
 static int debug = 0;
 module_param(debug, int, 0);
 MODULE_PARM_DESC(debug, "Debug level (0=none, 1=all)");
@@ -730,12 +745,12 @@ static u32 krping_rdma_rkey(struct krping_cb *cb, u64 buf, int post_inv)
 	ret = ib_map_mr_sg(cb->reg_mr, &sg, 1, NULL, PAGE_SIZE);
 	BUG_ON(ret <= 0 || ret > cb->page_list_len);
 
-	DEBUG_LOG(PFX "post_inv = %d, reg_mr new rkey 0x%x pgsz %u len %u"
+	DEBUG_LOG(PFX "post_inv = %d, reg_mr new rkey 0x%x pgsz %u len %llu"
 		" iova_start %llx\n",
 		post_inv,
 		cb->reg_mr_wr.key,
 		cb->reg_mr->page_size,
-		cb->reg_mr->length,
+		(unsigned long long)cb->reg_mr->length,
 		(unsigned long long)cb->reg_mr->iova);
 
 	if (post_inv)
