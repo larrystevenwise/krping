@@ -74,6 +74,15 @@
 #define pci_unmap_addr_set         dma_unmap_addr_set
 
 #endif
+
+#define ib_post_send(qp, wr, bad_wr)\
+	ib_post_send(qp, (const struct ib_send_wr *)wr,\
+		     (const struct ib_send_wr **)bad_wr)
+
+#define ib_post_recv(qp, wr, bad_wr)\
+	ib_post_recv(qp, (const struct ib_recv_wr *)wr,\
+		     (const struct ib_recv_wr **)bad_wr)
+
 static int debug = 0;
 module_param(debug, int, 0);
 MODULE_PARM_DESC(debug, "Debug level (0=none, 1=all)");
