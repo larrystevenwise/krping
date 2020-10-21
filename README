@@ -261,4 +261,18 @@ and compute RTT/2 or Gbps results.
 Use these at your own risk.
 
 
-END-OF-FILE
+Quick RUN
+=========
+modprobe rdma_krping debug=1
+
+ 
+Run the following on one of the servers (act as a server)
+echo "server,addr=12.12.12.1,port=9999",verbose >/proc/krping
+
+
+Run the following on the other server (act as a client)
+echo "client,addr=12.12.12.1,port=9999,count=100",verbose >/proc/krping
+
+You can check the dmesg or /var/log/messages for debug output. Additional command options can be found in the README file within the package.
+
+
