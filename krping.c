@@ -44,7 +44,7 @@
 #include <linux/in.h>
 #include <linux/device.h>
 #include <linux/pci.h>
-#include <linux/time.h>
+#include <linux/ktime.h>
 #include <linux/random.h>
 #include <linux/signal.h>
 #include <linux/proc_fs.h>
@@ -191,19 +191,19 @@ struct krping_cb {
 	struct ib_sge recv_sgl;		/* recv single SGE */
 	struct krping_rdma_info recv_buf __aligned(16);	/* malloc'd buffer */
 	u64 recv_dma_addr;
-	DECLARE_PCI_UNMAP_ADDR(recv_mapping)
+	DEFINE_DMA_UNMAP_ADDR(recv_mapping);
 
 	struct ib_send_wr sq_wr;	/* send work requrest record */
 	struct ib_sge send_sgl;
 	struct krping_rdma_info send_buf __aligned(16); /* single send buf */
 	u64 send_dma_addr;
-	DECLARE_PCI_UNMAP_ADDR(send_mapping)
+	DEFINE_DMA_UNMAP_ADDR(send_mapping);
 
 	struct ib_rdma_wr rdma_sq_wr;	/* rdma work request record */
 	struct ib_sge rdma_sgl;		/* rdma single SGE */
 	char *rdma_buf;			/* used as rdma sink */
 	u64  rdma_dma_addr;
-	DECLARE_PCI_UNMAP_ADDR(rdma_mapping)
+	DEFINE_DMA_UNMAP_ADDR(rdma_mapping);
 	struct ib_mr *rdma_mr;
 
 	uint32_t remote_rkey;		/* remote guys RKEY */
@@ -212,7 +212,7 @@ struct krping_cb {
 
 	char *start_buf;		/* rdma read src */
 	u64  start_dma_addr;
-	DECLARE_PCI_UNMAP_ADDR(start_mapping)
+	DEFINE_DMA_UNMAP_ADDR(start_mapping);
 	struct ib_mr *start_mr;
 
 	enum test_state state;		/* used for cond/signalling */
@@ -359,7 +359,7 @@ static void krping_cq_event_handler(struct ib_cq *cq, void *ctx)
 {
 	struct krping_cb *cb = ctx;
 	struct ib_wc wc;
-	struct ib_recv_wr *bad_wr;
+	const struct ib_recv_wr *bad_wr;
 	int ret;
 
 	BUG_ON(cb->cq != cq);
@@ -522,11 +522,11 @@ static int krping_setup_buffers(struct krping_cb *cb)
 	cb->recv_dma_addr = ib_dma_map_single(cb->pd->device,
 				   &cb->recv_buf, 
 				   sizeof(cb->recv_buf), DMA_BIDIRECTIONAL);
-	pci_unmap_addr_set(cb, recv_mapping, cb->recv_dma_addr);
+	dma_unmap_addr_set(cb, recv_mapping, cb->recv_dma_addr);
 	cb->send_dma_addr = ib_dma_map_single(cb->pd->device,
 					   &cb->send_buf, sizeof(cb->send_buf),
 					   DMA_BIDIRECTIONAL);
-	pci_unmap_addr_set(cb, send_mapping, cb->send_dma_addr);
+	dma_unmap_addr_set(cb, send_mapping, cb->send_dma_addr);
 
 	cb->rdma_buf = ib_dma_alloc_coherent(cb->pd->device, cb->size,
 					     &cb->rdma_dma_addr,
@@ -536,7 +536,7 @@ static int krping_setup_buffers(struct krping_cb *cb)
 		ret = -ENOMEM;
 		goto bail;
 	}
-	pci_unmap_addr_set(cb, rdma_mapping, cb->rdma_dma_addr);
+	dma_unmap_addr_set(cb, rdma_mapping, cb->rdma_dma_addr);
 	cb->page_list_len = (((cb->size - 1) & PAGE_MASK) + PAGE_SIZE)
 				>> PAGE_SHIFT;
 	cb->reg_mr = ib_alloc_mr(cb->pd,  IB_MR_TYPE_MEM_REG,
@@ -559,7 +559,7 @@ static int krping_setup_buffers(struct krping_cb *cb)
 			ret = -ENOMEM;
 			goto bail;
 		}
-		pci_unmap_addr_set(cb, start_mapping, cb->start_dma_addr);
+		dma_unmap_addr_set(cb, start_mapping, cb->start_dma_addr);
 	}
 
 	krping_setup_wr(cb);
@@ -597,10 +597,10 @@ static void krping_free_buffers(struct krping_cb *cb)
 		ib_dereg_mr(cb->reg_mr);
 
 	dma_unmap_single(cb->pd->device->dma_device,
-			 pci_unmap_addr(cb, recv_mapping),
+			 dma_unmap_addr(cb, recv_mapping),
 			 sizeof(cb->recv_buf), DMA_BIDIRECTIONAL);
 	dma_unmap_single(cb->pd->device->dma_device,
-			 pci_unmap_addr(cb, send_mapping),
+			 dma_unmap_addr(cb, send_mapping),
 			 sizeof(cb->send_buf), DMA_BIDIRECTIONAL);
 
 	ib_dma_free_coherent(cb->pd->device, cb->size, cb->rdma_buf,
@@ -705,7 +705,7 @@ err1:
 static u32 krping_rdma_rkey(struct krping_cb *cb, u64 buf, int post_inv)
 {
 	u32 rkey;
-	struct ib_send_wr *bad_wr;
+	const struct ib_send_wr *bad_wr;
 	int ret;
 	struct scatterlist sg = {0};
 
@@ -730,12 +730,12 @@ static u32 krping_rdma_rkey(struct krping_cb *cb, u64 buf, int post_inv)
 	ret = ib_map_mr_sg(cb->reg_mr, &sg, 1, NULL, PAGE_SIZE);
 	BUG_ON(ret <= 0 || ret > cb->page_list_len);
 
-	DEBUG_LOG(PFX "post_inv = %d, reg_mr new rkey 0x%x pgsz %u len %u"
+	DEBUG_LOG(PFX "post_inv = %d, reg_mr new rkey 0x%x pgsz %u len %lu"
 		" iova_start %llx\n",
 		post_inv,
 		cb->reg_mr_wr.key,
 		cb->reg_mr->page_size,
-		cb->reg_mr->length,
+		(unsigned long)cb->reg_mr->length,
 		(unsigned long long)cb->reg_mr->iova);
 
 	if (post_inv)
@@ -772,7 +772,8 @@ static void krping_format_send(struct krping_cb *cb, u64 buf)
 
 static void krping_test_server(struct krping_cb *cb)
 {
-	struct ib_send_wr *bad_wr, inv;
+	struct ib_send_wr inv;
+	const struct ib_send_wr *bad_wr;
 	int ret;
 
 	while (1) {
@@ -911,10 +912,10 @@ static void rlat_test(struct krping_cb *cb)
 {
 	int scnt;
 	int iters = cb->count;
-	struct timeval start_tv, stop_tv;
+	ktime_t start, stop;
 	int ret;
 	struct ib_wc wc;
-	struct ib_send_wr *bad_wr;
+	const struct ib_send_wr *bad_wr;
 	int ne;
 
 	scnt = 0;
@@ -923,7 +924,7 @@ static void rlat_test(struct krping_cb *cb)
 	cb->rdma_sq_wr.remote_addr = cb->remote_addr;
 	cb->rdma_sq_wr.wr.sg_list->length = cb->size;
 
-	do_gettimeofday(&start_tv);
+	start = ktime_get();
 	if (!cb->poll) {
 		cb->state = RDMA_READ_ADV;
 		ib_req_notify_cq(cb->cq, IB_CQ_NEXT_COMP);
@@ -973,16 +974,10 @@ static void rlat_test(struct krping_cb *cb)
 		}
 		++scnt;
 	}
-	do_gettimeofday(&stop_tv);
+	stop = ktime_get();
 
-        if (stop_tv.tv_usec < start_tv.tv_usec) {
-                stop_tv.tv_usec += 1000000;
-                stop_tv.tv_sec  -= 1;
-        }
-
-	printk(KERN_ERR PFX "delta sec %lu delta usec %lu iter %d size %d\n",
-		(unsigned long)(stop_tv.tv_sec - start_tv.tv_sec),
-		(unsigned long)(stop_tv.tv_usec - start_tv.tv_usec),
+	printk(KERN_ERR PFX "delta nsec %llu iter %d size %d\n",
+		ktime_sub(stop, start),
 		scnt, cb->size);
 }
 
@@ -992,7 +987,7 @@ static void wlat_test(struct krping_cb *cb)
 	int iters=cb->count;
 	volatile char *poll_buf = (char *) cb->start_buf;
 	char *buf = (char *)cb->rdma_buf;
-	struct timeval start_tv, stop_tv;
+	ktime_t start, stop;
 	cycles_t *post_cycles_start = NULL;
 	cycles_t *post_cycles_stop = NULL;
 	cycles_t *poll_cycles_start = NULL;
@@ -1039,7 +1034,7 @@ static void wlat_test(struct krping_cb *cb)
 
 	if (cycle_iters > iters)
 		cycle_iters = iters;
-	do_gettimeofday(&start_tv);
+	start = ktime_get();
 	while (scnt < iters || ccnt < iters || rcnt < iters) {
 
 		/* Wait till buffer changes. */
@@ -1055,7 +1050,7 @@ static void wlat_test(struct krping_cb *cb)
 		}
 
 		if (scnt < iters) {
-			struct ib_send_wr *bad_wr;
+			const struct ib_send_wr *bad_wr;
 
 			*buf = (char)scnt+1;
 			if (scnt < cycle_iters)
@@ -1105,12 +1100,7 @@ static void wlat_test(struct krping_cb *cb)
 			}
 		}
 	}
-	do_gettimeofday(&stop_tv);
-
-        if (stop_tv.tv_usec < start_tv.tv_usec) {
-                stop_tv.tv_usec += 1000000;
-                stop_tv.tv_sec  -= 1;
-        }
+	stop = ktime_get();
 
 	for (i=0; i < cycle_iters; i++) {
 		sum_post += post_cycles_stop[i] - post_cycles_start[i];
@@ -1118,10 +1108,9 @@ static void wlat_test(struct krping_cb *cb)
 		sum_last_poll += poll_cycles_stop[i]-last_poll_cycles_start[i];
 	}
 	printk(KERN_ERR PFX 
-		"delta sec %lu delta usec %lu iter %d size %d cycle_iters %d"
+		"delta nsec %llu iter %d size %d cycle_iters %d"
 		" sum_post %llu sum_poll %llu sum_last_poll %llu\n",
-		(unsigned long)(stop_tv.tv_sec - start_tv.tv_sec),
-		(unsigned long)(stop_tv.tv_usec - start_tv.tv_usec),
+		ktime_sub(stop, start),
 		scnt, cb->size, cycle_iters,
 		(unsigned long long)sum_post, (unsigned long long)sum_poll, 
 		(unsigned long long)sum_last_poll);
@@ -1137,7 +1126,7 @@ static void bw_test(struct krping_cb *cb)
 {
 	int ccnt, scnt, rcnt;
 	int iters=cb->count;
-	struct timeval start_tv, stop_tv;
+	ktime_t start, stop;
 	cycles_t *post_cycles_start = NULL;
 	cycles_t *post_cycles_stop = NULL;
 	cycles_t *poll_cycles_start = NULL;
@@ -1184,11 +1173,11 @@ static void bw_test(struct krping_cb *cb)
 
 	if (cycle_iters > iters)
 		cycle_iters = iters;
-	do_gettimeofday(&start_tv);
+	start = ktime_get();
 	while (scnt < iters || ccnt < iters) {
 
 		while (scnt < iters && scnt - ccnt < cb->txdepth) {
-			struct ib_send_wr *bad_wr;
+			const struct ib_send_wr *bad_wr;
 
 			if (scnt < cycle_iters)
 				post_cycles_start[scnt] = get_cycles();
@@ -1234,12 +1223,7 @@ static void bw_test(struct krping_cb *cb)
 			}
 		}
 	}
-	do_gettimeofday(&stop_tv);
-
-        if (stop_tv.tv_usec < start_tv.tv_usec) {
-                stop_tv.tv_usec += 1000000;
-                stop_tv.tv_sec  -= 1;
-        }
+	stop = ktime_get();
 
 	for (i=0; i < cycle_iters; i++) {
 		sum_post += post_cycles_stop[i] - post_cycles_start[i];
@@ -1247,11 +1231,9 @@ static void bw_test(struct krping_cb *cb)
 		sum_last_poll += poll_cycles_stop[i]-last_poll_cycles_start[i];
 	}
 	printk(KERN_ERR PFX 
-		"delta sec %lu delta usec %lu iter %d size %d cycle_iters %d"
+		"delta nsec %llu iter %d size %d cycle_iters %d"
 		" sum_post %llu sum_poll %llu sum_last_poll %llu\n",
-		(unsigned long)(stop_tv.tv_sec - start_tv.tv_sec),
-		(unsigned long)(stop_tv.tv_usec - start_tv.tv_usec),
-		scnt, cb->size, cycle_iters, 
+		ktime_sub(stop, start), scnt, cb->size, cycle_iters, 
 		(unsigned long long)sum_post, (unsigned long long)sum_poll, 
 		(unsigned long long)sum_last_poll);
 done:
@@ -1264,7 +1246,7 @@ done:
 
 static void krping_rlat_test_server(struct krping_cb *cb)
 {
-	struct ib_send_wr *bad_wr;
+	const struct ib_send_wr *bad_wr;
 	struct ib_wc wc;
 	int ret;
 
@@ -1297,7 +1279,7 @@ static void krping_rlat_test_server(struct krping_cb *cb)
 
 static void krping_wlat_test_server(struct krping_cb *cb)
 {
-	struct ib_send_wr *bad_wr;
+	const struct ib_send_wr *bad_wr;
 	struct ib_wc wc;
 	int ret;
 
@@ -1331,7 +1313,7 @@ static void krping_wlat_test_server(struct krping_cb *cb)
 
 static void krping_bw_test_server(struct krping_cb *cb)
 {
-	struct ib_send_wr *bad_wr;
+	const struct ib_send_wr *bad_wr;
 	struct ib_wc wc;
 	int ret;
 
@@ -1442,7 +1424,7 @@ static int krping_bind_server(struct krping_cb *cb)
 
 static void krping_run_server(struct krping_cb *cb)
 {
-	struct ib_recv_wr *bad_wr;
+	const struct ib_recv_wr *bad_wr;
 	int ret;
 
 	ret = krping_bind_server(cb);
@@ -1493,7 +1475,7 @@ err0:
 static void krping_test_client(struct krping_cb *cb)
 {
 	int ping, start, cc, i, ret;
-	struct ib_send_wr *bad_wr;
+	const struct ib_send_wr *bad_wr;
 	unsigned char c;
 
 	start = 65;
@@ -1567,7 +1549,7 @@ static void krping_test_client(struct krping_cb *cb)
 
 static void krping_rlat_test_client(struct krping_cb *cb)
 {
-	struct ib_send_wr *bad_wr;
+	const struct ib_send_wr *bad_wr;
 	struct ib_wc wc;
 	int ret;
 
@@ -1604,7 +1586,7 @@ static void krping_rlat_test_client(struct krping_cb *cb)
 #if 0
 {
 	int i;
-	struct timeval start, stop;
+	ktime_t start, stop;
 	time_t sec;
 	suseconds_t usec;
 	unsigned long long elapsed;
@@ -1618,7 +1600,7 @@ static void krping_rlat_test_client(struct krping_cb *cb)
 	cb->rdma_sq_wr.wr.sg_list->length = 0;
 	cb->rdma_sq_wr.wr.num_sge = 0;
 
-	do_gettimeofday(&start);
+	start = ktime_get();
 	for (i=0; i < 100000; i++) {
 		if (ib_post_send(cb->qp, &cb->rdma_sq_wr.wr, &bad_wr)) {
 			printk(KERN_ERR PFX  "Couldn't post send\n");
@@ -1639,7 +1621,7 @@ static void krping_rlat_test_client(struct krping_cb *cb)
 			return;
 		}
 	}
-	do_gettimeofday(&stop);
+	stop = ktime_get();
 	
 	if (stop.tv_usec < start.tv_usec) {
 		stop.tv_usec += 1000000;
@@ -1657,7 +1639,7 @@ static void krping_rlat_test_client(struct krping_cb *cb)
 
 static void krping_wlat_test_client(struct krping_cb *cb)
 {
-	struct ib_send_wr *bad_wr;
+	const struct ib_send_wr *bad_wr;
 	struct ib_wc wc;
 	int ret;
 
@@ -1696,7 +1678,7 @@ static void krping_wlat_test_client(struct krping_cb *cb)
 
 static void krping_bw_test_client(struct krping_cb *cb)
 {
-	struct ib_send_wr *bad_wr;
+	const struct ib_send_wr *bad_wr;
 	struct ib_wc wc;
 	int ret;
 
@@ -1738,8 +1720,10 @@ static void krping_bw_test_client(struct krping_cb *cb)
  */
 static void flush_qp(struct krping_cb *cb)
 {
-	struct ib_send_wr wr = { 0 }, *bad;
-	struct ib_recv_wr recv_wr = { 0 }, *recv_bad;
+	struct ib_send_wr wr = { 0 };
+	const struct ib_send_wr *bad;
+	struct ib_recv_wr recv_wr = { 0 };
+	const struct ib_recv_wr *recv_bad;
 	struct ib_wc wc;
 	int ret;
 	int flushed = 0;
@@ -1782,7 +1766,8 @@ static void flush_qp(struct krping_cb *cb)
 
 static void krping_fr_test(struct krping_cb *cb)
 {
-	struct ib_send_wr inv, *bad;
+	struct ib_send_wr inv;
+	const struct ib_send_wr *bad;
 	struct ib_reg_wr fr;
 	struct ib_wc wc;
 	u8 key = 0;
@@ -1931,7 +1916,7 @@ static int krping_bind_client(struct krping_cb *cb)
 
 static void krping_run_client(struct krping_cb *cb)
 {
-	struct ib_recv_wr *bad_wr;
+	const struct ib_recv_wr *bad_wr;
 	int ret;
 
 	/* set type of service, if any */
