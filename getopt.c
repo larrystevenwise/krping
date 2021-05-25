@@ -6,7 +6,7 @@
 
 #include <asm/errno.h>
 
-#include "getopt.h"
+#include "krping.h"
 
 /**
  *	krping_getopt - option parser

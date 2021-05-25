@@ -1,8 +1,13 @@
-7/2008
+5/2021
 
 If you're building against a kernel.org kernel or a kernel with the
 RDMA drivers included (ie non-ofed), then simply edit the Makefile,
-change KSRC accordingly, and do 'make && make install'.
+change KSRC/KOBJ accordingly, and do 'make && make install'.
+
+----
+WARNING: The following instructions and the install-ofa.sh are very
+out dated and won't work.  You're on your own...
+----
 
 If you want to build this on a system running the ofed drivers:
 

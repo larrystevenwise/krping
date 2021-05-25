@@ -38,7 +38,6 @@
 #include <linux/err.h>
 #include <linux/string.h>
 #include <linux/parser.h>
-#include <linux/proc_fs.h>
 #include <linux/inet.h>
 #include <linux/list.h>
 #include <linux/in.h>
@@ -47,7 +46,7 @@
 #include <linux/ktime.h>
 #include <linux/random.h>
 #include <linux/signal.h>
-#include <linux/proc_fs.h>
+#include <linux/workqueue.h>
 
 #include <asm/atomic.h>
 #include <asm/pci.h>
@@ -55,7 +54,7 @@
 #include <rdma/ib_verbs.h>
 #include <rdma/rdma_cm.h>
 
-#include "getopt.h"
+#include "krping.h"
 
 #define PFX "krping: "
 
@@ -92,17 +91,6 @@ static const struct krping_option krping_opts[] = {
 	{NULL, 0, 0}
 };
 
-struct krping_stats {
-	unsigned long long send_bytes;
-	unsigned long long send_msgs;
-	unsigned long long recv_bytes;
-	unsigned long long recv_msgs;
-	unsigned long long write_bytes;
-	unsigned long long write_msgs;
-	unsigned long long read_bytes;
-	unsigned long long read_msgs;
-};
-
 #define htonll(x) cpu_to_be64((x))
 #define ntohll(x) cpu_to_be64((x))
 
@@ -113,16 +101,7 @@ static DEFINE_MUTEX(krping_mutex);
  */
 static LIST_HEAD(krping_cbs);
 
-static struct proc_dir_entry *krping_proc;
-
 /*
- * Invoke like this, one on each side, using the server's address on
- * the RDMA device (iw%d):
- *
- * /bin/echo server,port=9999,addr=192.168.69.142,validate > /proc/krping  
- * /bin/echo client,port=9999,addr=192.168.69.142,validate > /proc/krping  
- * /bin/echo client,port=9999,addr6=2001:db8:0:f101::1,validate > /proc/krping
- *
  * krping "ping/pong" loop:
  * 	client sends source rkey/addr/len
  *	server receives source rkey/add/len
@@ -136,114 +115,12 @@ static struct proc_dir_entry *krping_proc;
  */
 
 /*
- * These states are used to signal events between the completion handler
- * and the main client or server thread.
- *
- * Once CONNECTED, they cycle through RDMA_READ_ADV, RDMA_WRITE_ADV,
- * and RDMA_WRITE_COMPLETE for each ping.
- */
-enum test_state {
-	IDLE = 1,
-	CONNECT_REQUEST,
-	ADDR_RESOLVED,
-	ROUTE_RESOLVED,
-	CONNECTED,
-	RDMA_READ_ADV,
-	RDMA_READ_COMPLETE,
-	RDMA_WRITE_ADV,
-	RDMA_WRITE_COMPLETE,
-	ERROR
-};
-
-struct krping_rdma_info {
-	uint64_t buf;
-	uint32_t rkey;
-	uint32_t size;
-};
-
-/*
  * Default max buffer size for IO...
  */
 #define RPING_BUFSIZE 128*1024
 #define RPING_SQ_DEPTH 64
 
-/*
- * Control block struct.
- */
-struct krping_cb {
-	int server;			/* 0 iff client */
-	struct ib_cq *cq;
-	struct ib_pd *pd;
-	struct ib_qp *qp;
-
-	struct ib_mr *dma_mr;
-
-	struct ib_fast_reg_page_list *page_list;
-	int page_list_len;
-	struct ib_reg_wr reg_mr_wr;
-	struct ib_send_wr invalidate_wr;
-	struct ib_mr *reg_mr;
-	int server_invalidate;
-	int read_inv;
-	u8 key;
-
-	struct ib_recv_wr rq_wr;	/* recv work request record */
-	struct ib_sge recv_sgl;		/* recv single SGE */
-	struct krping_rdma_info recv_buf __aligned(16);	/* malloc'd buffer */
-	u64 recv_dma_addr;
-	DEFINE_DMA_UNMAP_ADDR(recv_mapping);
-
-	struct ib_send_wr sq_wr;	/* send work requrest record */
-	struct ib_sge send_sgl;
-	struct krping_rdma_info send_buf __aligned(16); /* single send buf */
-	u64 send_dma_addr;
-	DEFINE_DMA_UNMAP_ADDR(send_mapping);
-
-	struct ib_rdma_wr rdma_sq_wr;	/* rdma work request record */
-	struct ib_sge rdma_sgl;		/* rdma single SGE */
-	char *rdma_buf;			/* used as rdma sink */
-	u64  rdma_dma_addr;
-	DEFINE_DMA_UNMAP_ADDR(rdma_mapping);
-	struct ib_mr *rdma_mr;
-
-	uint32_t remote_rkey;		/* remote guys RKEY */
-	uint64_t remote_addr;		/* remote guys TO */
-	uint32_t remote_len;		/* remote guys LEN */
-
-	char *start_buf;		/* rdma read src */
-	u64  start_dma_addr;
-	DEFINE_DMA_UNMAP_ADDR(start_mapping);
-	struct ib_mr *start_mr;
-
-	enum test_state state;		/* used for cond/signalling */
-	wait_queue_head_t sem;
-	struct krping_stats stats;
-
-	uint16_t port;			/* dst port in NBO */
-	u8 addr[16];			/* dst addr in NBO */
-	char ip6_ndev_name[128];	/* IPv6 netdev name */
-	char *addr_str;			/* dst addr string */
-	uint8_t addr_type;		/* ADDR_FAMILY - IPv4/V6 */
-	int verbose;			/* verbose logging */
-	int count;			/* ping count */
-	int size;			/* ping data size */
-	int validate;			/* validate ping data */
-	int wlat;			/* run wlat test */
-	int rlat;			/* run rlat test */
-	int bw;				/* run bw test */
-	int duplex;			/* run bw full duplex test */
-	int poll;			/* poll or block for rlat test */
-	int txdepth;			/* SQ depth */
-	int local_dma_lkey;		/* use 0 for lkey */
-	int frtest;			/* reg test */
-	int tos;			/* type of service */
-
-	/* CM stuff */
-	struct rdma_cm_id *cm_id;	/* connection on client side,*/
-					/* listener on server side. */
-	struct rdma_cm_id *child_cm_id;	/* connection on server side */
-	struct list_head list;
-};
+static struct workqueue_struct *krping_wq;
 
 static int krping_cma_event_handler(struct rdma_cm_id *cma_id,
 				   struct rdma_cm_event *event)
@@ -1968,28 +1845,38 @@ err1:
 	krping_free_qp(cb);
 }
 
-int krping_doit(char *cmd)
+static void krping_doit_work(struct work_struct *work)
 {
-	struct krping_cb *cb;
+	struct krping_cb *cb = container_of(work, struct krping_cb, krping_work);
+
+	if (cb->server)
+		krping_run_server(cb);
+	else
+		krping_run_client(cb);
+
+	DEBUG_LOG("destroy cm_id %p\n", cb->cm_id);
+	rdma_destroy_id(cb->cm_id);
+
+	mutex_lock(&krping_mutex);
+	list_del(&cb->list);
+	mutex_unlock(&krping_mutex);
+	return;
+}
+
+int krping_doit(struct krping_cb *cb, char *cmd)
+{
 	int op;
 	int ret = 0;
 	char *optarg;
 	char *scope;
 	unsigned long optint;
 
-	cb = kzalloc(sizeof(*cb), GFP_KERNEL);
-	if (!cb)
-		return -ENOMEM;
-
-	mutex_lock(&krping_mutex);
-	list_add_tail(&cb->list, &krping_cbs);
-	mutex_unlock(&krping_mutex);
-
 	cb->server = -1;
 	cb->state = IDLE;
 	cb->size = 64;
 	cb->txdepth = RPING_SQ_DEPTH;
 	init_waitqueue_head(&cb->sem);
+	INIT_WORK(&cb->krping_work, krping_doit_work);
 
 	while ((op = krping_getopt("krping", &cmd, krping_opts, NULL, &optarg,
 			      &optint)) != 0) {
@@ -2133,111 +2020,33 @@ int krping_doit(char *cmd)
 		printk(KERN_ERR PFX "rdma_create_id error %d\n", ret);
 		goto out;
 	}
+
 	DEBUG_LOG("created cm_id %p\n", cb->cm_id);
-
-	if (cb->server)
-		krping_run_server(cb);
-	else
-		krping_run_client(cb);
-
-	DEBUG_LOG("destroy cm_id %p\n", cb->cm_id);
-	rdma_destroy_id(cb->cm_id);
-out:
 	mutex_lock(&krping_mutex);
-	list_del(&cb->list);
+	list_add_tail(&cb->list, &krping_cbs);
 	mutex_unlock(&krping_mutex);
-	kfree(cb);
+	queue_work(krping_wq, &cb->krping_work);
+	return 0;
+out:
 	return ret;
 }
 
-/*
- * Read proc returns stats for each device.
- */
-static int krping_read_proc(struct seq_file *seq, void *v)
-{
-	struct krping_cb *cb;
-	int num = 1;
-
-	if (!try_module_get(THIS_MODULE))
-		return -ENODEV;
-	DEBUG_LOG(KERN_INFO PFX "proc read called...\n");
-	mutex_lock(&krping_mutex);
-	list_for_each_entry(cb, &krping_cbs, list) {
-		if (cb->pd) {
-			seq_printf(seq,
-			     "%d-%s %lld %lld %lld %lld %lld %lld %lld %lld\n",
-			     num++, cb->pd->device->name, cb->stats.send_bytes,
-			     cb->stats.send_msgs, cb->stats.recv_bytes,
-			     cb->stats.recv_msgs, cb->stats.write_bytes,
-			     cb->stats.write_msgs,
-			     cb->stats.read_bytes,
-			     cb->stats.read_msgs);
-		} else {
-			seq_printf(seq, "%d listen\n", num++);
-		}
-	}
-	mutex_unlock(&krping_mutex);
-	module_put(THIS_MODULE);
-	return 0;
-}
-
-/*
- * Write proc is used to start a ping client or server.
- */
-static ssize_t krping_write_proc(struct file * file, const char __user * buffer,
-		size_t count, loff_t *ppos)
-{
-	char *cmd;
-	int rc;
-
-	if (!try_module_get(THIS_MODULE))
-		return -ENODEV;
-
-	cmd = kmalloc(count, GFP_KERNEL);
-	if (cmd == NULL) {
-		printk(KERN_ERR PFX "kmalloc failure\n");
-		return -ENOMEM;
-	}
-	if (copy_from_user(cmd, buffer, count)) {
-		kfree(cmd);
-		return -EFAULT;
-	}
-
-	/*
-	 * remove the \n.
-	 */
-	cmd[count - 1] = 0;
-	DEBUG_LOG(KERN_INFO PFX "proc write |%s|\n", cmd);
-	rc = krping_doit(cmd);
-	kfree(cmd);
-	module_put(THIS_MODULE);
-	if (rc)
-		return rc;
-	else
-		return (int) count;
-}
-
-static int krping_read_open(struct inode *inode, struct file *file)
-{
-        return single_open(file, krping_read_proc, inode->i_private);
-}
-
-static struct file_operations krping_ops = {
-	.owner = THIS_MODULE,
-	.open = krping_read_open,
-	.read = seq_read,
-	.llseek  = seq_lseek,
-	.release = single_release,
-	.write = krping_write_proc,
-};
-
 static int __init krping_init(void)
 {
+	int ret = 0;
+
 	DEBUG_LOG("krping_init\n");
-	krping_proc = proc_create("krping", 0666, NULL, &krping_ops);
-	if (krping_proc == NULL) {
-		printk(KERN_ERR PFX "cannot create /proc/krping\n");
+	krping_wq = alloc_workqueue("krping", WQ_MEM_RECLAIM, 0);
+	if (!krping_wq) {
+		pr_err(PFX "Failed to allocate workqueue\n");
 		return -ENOMEM;
+	}
+
+	ret = krping_configfs_init();
+	if (ret) {
+		pr_err(PFX "failed to init configfs\n");
+		destroy_workqueue(krping_wq);
+		return ret;
 	}
 	return 0;
 }
@@ -2245,7 +2054,8 @@ static int __init krping_init(void)
 static void __exit krping_exit(void)
 {
 	DEBUG_LOG("krping_exit\n");
-	remove_proc_entry("krping", NULL);
+	krping_configfs_exit();
+	destroy_workqueue(krping_wq);
 }
 
 module_init(krping_init);

@@ -3,7 +3,7 @@ KOBJ=/lib/modules/`uname -r`/build
 
 
 obj-m += rdma_krping.o
-rdma_krping-y			:= getopt.o krping.o
+rdma_krping-y			:= getopt.o krping.o configfs.o
 
 default:
 	make -C $(KSRC) M=`pwd` modules
@@ -18,3 +18,6 @@ clean:
 	rm -f rdma_krping.mod.c
 	rm -f Module.symvers
 	rm -f Module.markers
+	rm -f *.mod
+	rm -f .*.cmd
+	rm -f modules.order
