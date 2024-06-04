@@ -572,11 +572,11 @@ bail:
 	if (cb->dma_mr && !IS_ERR(cb->dma_mr))
 		ib_dereg_mr(cb->dma_mr);
 	if (cb->rdma_buf) {
-		ib_dma_free_coherent(cb->pd->device, cb->size, cb->rdma_buf,
+		dma_free_coherent(cb->pd->device->dma_device, cb->size, cb->rdma_buf,
 				     cb->rdma_dma_addr);
 	}
 	if (cb->start_buf) {
-		ib_dma_free_coherent(cb->pd->device, cb->size, cb->start_buf,
+		dma_free_coherent(cb->pd->device->dma_device, cb->size, cb->start_buf,
 				     cb->start_dma_addr);
 	}
 	return ret;
