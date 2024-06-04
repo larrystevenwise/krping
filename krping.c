@@ -1764,6 +1764,14 @@ static void flush_qp(struct krping_cb *cb)
 	DEBUG_LOG("qp_flushed! ccnt %u\n", ccnt);
 }
 
+static unsigned long get_seconds(void)
+{
+	time64_t sec;
+
+	sec = ktime_get_seconds();
+	return (unsigned long)sec;
+}
+
 static void krping_fr_test(struct krping_cb *cb)
 {
 	struct ib_send_wr inv;
@@ -1776,6 +1784,7 @@ static void krping_fr_test(struct krping_cb *cb)
 	int size = cb->size;
 	int plen = (((size - 1) & PAGE_MASK) + PAGE_SIZE) >> PAGE_SHIFT;
 	unsigned long start;
+	// time64_t start;
 	int count = 0;
 	int scnt = 0;
 	struct scatterlist sg = {0};
@@ -1805,7 +1814,7 @@ static void krping_fr_test(struct krping_cb *cb)
 	inv.send_flags = IB_SEND_SIGNALED;
 	
 	DEBUG_LOG("fr_test: stag index 0x%x plen %u size %u depth %u\n", mr->rkey >> 8, plen, cb->size, cb->txdepth);
-	start = get_seconds();
+	start = ktime_get_seconds();
 	while (!cb->count || count <= cb->count) {
 		if (signal_pending(current)) {
 			printk(KERN_ERR PFX "signal!\n");
@@ -1823,7 +1832,8 @@ static void krping_fr_test(struct krping_cb *cb)
 			fr.key = mr->rkey;
 			inv.ex.invalidate_rkey = mr->rkey;
 
-			size = prandom_u32() % cb->size;
+			// size = prandom_u32() % cb->size;
+			size = get_random_u32() % cb->size;
 			if (size == 0)
 				size = cb->size;
 			sg_dma_len(&sg) = size;
@@ -2222,13 +2232,13 @@ static int krping_read_open(struct inode *inode, struct file *file)
         return single_open(file, krping_read_proc, inode->i_private);
 }
 
-static struct file_operations krping_ops = {
-	.owner = THIS_MODULE,
-	.open = krping_read_open,
-	.read = seq_read,
-	.llseek  = seq_lseek,
-	.release = single_release,
-	.write = krping_write_proc,
+static const struct proc_ops krping_ops = {
+	// .owner = THIS_MODULE,
+	.proc_open = krping_read_open,
+	.proc_read = seq_read,
+	.proc_write = krping_write_proc,
+	.proc_lseek  = seq_lseek,
+	.proc_release = single_release,
 };
 
 static int __init krping_init(void)
