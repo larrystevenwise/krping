@@ -528,7 +528,8 @@ static int krping_setup_buffers(struct krping_cb *cb)
 					   DMA_BIDIRECTIONAL);
 	dma_unmap_addr_set(cb, send_mapping, cb->send_dma_addr);
 
-	cb->rdma_buf = ib_dma_alloc_coherent(cb->pd->device, cb->size,
+	// cb->rdma_buf = ib_dma_alloc_coherent(cb->pd->device, cb->size,
+	cb->rdma_buf = dma_alloc_coherent(cb->pd->device->dma_device, cb->size,
 					     &cb->rdma_dma_addr,
 					     GFP_KERNEL);
 	if (!cb->rdma_buf) {
@@ -551,7 +552,8 @@ static int krping_setup_buffers(struct krping_cb *cb)
 
 	if (!cb->server || cb->wlat || cb->rlat || cb->bw) {
 
-		cb->start_buf = ib_dma_alloc_coherent(cb->pd->device, cb->size,
+		// cb->start_buf = ib_dma_alloc_coherent(cb->pd->device, cb->size,
+		cb->start_buf = dma_alloc_coherent(cb->pd->device->dma_device, cb->size,
 						      &cb->start_dma_addr,
 						      GFP_KERNEL);
 		if (!cb->start_buf) {
