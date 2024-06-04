@@ -528,7 +528,6 @@ static int krping_setup_buffers(struct krping_cb *cb)
 					   DMA_BIDIRECTIONAL);
 	dma_unmap_addr_set(cb, send_mapping, cb->send_dma_addr);
 
-	// cb->rdma_buf = ib_dma_alloc_coherent(cb->pd->device, cb->size,
 	cb->rdma_buf = dma_alloc_coherent(cb->pd->device->dma_device, cb->size,
 					     &cb->rdma_dma_addr,
 					     GFP_KERNEL);
@@ -551,8 +550,6 @@ static int krping_setup_buffers(struct krping_cb *cb)
 		cb->reg_mr->rkey, cb->page_list_len);
 
 	if (!cb->server || cb->wlat || cb->rlat || cb->bw) {
-
-		// cb->start_buf = ib_dma_alloc_coherent(cb->pd->device, cb->size,
 		cb->start_buf = dma_alloc_coherent(cb->pd->device->dma_device, cb->size,
 						      &cb->start_dma_addr,
 						      GFP_KERNEL);
@@ -605,11 +602,11 @@ static void krping_free_buffers(struct krping_cb *cb)
 			 dma_unmap_addr(cb, send_mapping),
 			 sizeof(cb->send_buf), DMA_BIDIRECTIONAL);
 
-	ib_dma_free_coherent(cb->pd->device, cb->size, cb->rdma_buf,
+	dma_free_coherent(cb->pd->device->dma_device, cb->size, cb->rdma_buf,
 			     cb->rdma_dma_addr);
 
 	if (cb->start_buf) {
-		ib_dma_free_coherent(cb->pd->device, cb->size, cb->start_buf,
+		dma_free_coherent(cb->pd->device->dma_device, cb->size, cb->start_buf,
 				     cb->start_dma_addr);
 	}
 }
