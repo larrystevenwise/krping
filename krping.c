@@ -59,7 +59,7 @@
 
 #define PFX "krping: "
 
-static int debug = 0;
+static int debug = 1;
 module_param(debug, int, 0);
 MODULE_PARM_DESC(debug, "Debug level (0=none, 1=all)");
 #define DEBUG_LOG if (debug) printk
@@ -1813,7 +1813,7 @@ static void krping_fr_test(struct krping_cb *cb)
 	inv.send_flags = IB_SEND_SIGNALED;
 	
 	DEBUG_LOG("fr_test: stag index 0x%x plen %u size %u depth %u\n", mr->rkey >> 8, plen, cb->size, cb->txdepth);
-	start = ktime_get_seconds();
+	start = get_seconds();
 	while (!cb->count || count <= cb->count) {
 		if (signal_pending(current)) {
 			printk(KERN_ERR PFX "signal!\n");
