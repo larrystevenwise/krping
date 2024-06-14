@@ -59,7 +59,7 @@
 
 #define PFX "krping: "
 
-static int debug = 1;
+static int debug = 0;
 module_param(debug, int, 0);
 MODULE_PARM_DESC(debug, "Debug level (0=none, 1=all)");
 #define DEBUG_LOG if (debug) printk
@@ -1783,7 +1783,6 @@ static void krping_fr_test(struct krping_cb *cb)
 	int size = cb->size;
 	int plen = (((size - 1) & PAGE_MASK) + PAGE_SIZE) >> PAGE_SHIFT;
 	unsigned long start;
-	// time64_t start;
 	int count = 0;
 	int scnt = 0;
 	struct scatterlist sg = {0};
@@ -1831,7 +1830,6 @@ static void krping_fr_test(struct krping_cb *cb)
 			fr.key = mr->rkey;
 			inv.ex.invalidate_rkey = mr->rkey;
 
-			// size = prandom_u32() % cb->size;
 			size = get_random_u32() % cb->size;
 			if (size == 0)
 				size = cb->size;
@@ -1977,7 +1975,7 @@ err1:
 	krping_free_qp(cb);
 }
 
-int krping_doit(char *cmd)
+static int krping_doit(char *cmd)
 {
 	struct krping_cb *cb;
 	int op;
