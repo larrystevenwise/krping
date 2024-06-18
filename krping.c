@@ -528,7 +528,7 @@ static int krping_setup_buffers(struct krping_cb *cb)
 					   DMA_BIDIRECTIONAL);
 	dma_unmap_addr_set(cb, send_mapping, cb->send_dma_addr);
 
-	cb->rdma_buf = ib_dma_alloc_coherent(cb->pd->device, cb->size,
+	cb->rdma_buf = dma_alloc_coherent(cb->pd->device->dma_device, cb->size,
 					     &cb->rdma_dma_addr,
 					     GFP_KERNEL);
 	if (!cb->rdma_buf) {
@@ -550,8 +550,7 @@ static int krping_setup_buffers(struct krping_cb *cb)
 		cb->reg_mr->rkey, cb->page_list_len);
 
 	if (!cb->server || cb->wlat || cb->rlat || cb->bw) {
-
-		cb->start_buf = ib_dma_alloc_coherent(cb->pd->device, cb->size,
+		cb->start_buf = dma_alloc_coherent(cb->pd->device->dma_device, cb->size,
 						      &cb->start_dma_addr,
 						      GFP_KERNEL);
 		if (!cb->start_buf) {
@@ -573,11 +572,11 @@ bail:
 	if (cb->dma_mr && !IS_ERR(cb->dma_mr))
 		ib_dereg_mr(cb->dma_mr);
 	if (cb->rdma_buf) {
-		ib_dma_free_coherent(cb->pd->device, cb->size, cb->rdma_buf,
+		dma_free_coherent(cb->pd->device->dma_device, cb->size, cb->rdma_buf,
 				     cb->rdma_dma_addr);
 	}
 	if (cb->start_buf) {
-		ib_dma_free_coherent(cb->pd->device, cb->size, cb->start_buf,
+		dma_free_coherent(cb->pd->device->dma_device, cb->size, cb->start_buf,
 				     cb->start_dma_addr);
 	}
 	return ret;
@@ -603,11 +602,11 @@ static void krping_free_buffers(struct krping_cb *cb)
 			 dma_unmap_addr(cb, send_mapping),
 			 sizeof(cb->send_buf), DMA_BIDIRECTIONAL);
 
-	ib_dma_free_coherent(cb->pd->device, cb->size, cb->rdma_buf,
+	dma_free_coherent(cb->pd->device->dma_device, cb->size, cb->rdma_buf,
 			     cb->rdma_dma_addr);
 
 	if (cb->start_buf) {
-		ib_dma_free_coherent(cb->pd->device, cb->size, cb->start_buf,
+		dma_free_coherent(cb->pd->device->dma_device, cb->size, cb->start_buf,
 				     cb->start_dma_addr);
 	}
 }
@@ -1764,6 +1763,14 @@ static void flush_qp(struct krping_cb *cb)
 	DEBUG_LOG("qp_flushed! ccnt %u\n", ccnt);
 }
 
+static unsigned long get_seconds(void)
+{
+	time64_t sec;
+
+	sec = ktime_get_seconds();
+	return (unsigned long)sec;
+}
+
 static void krping_fr_test(struct krping_cb *cb)
 {
 	struct ib_send_wr inv;
@@ -1823,7 +1830,7 @@ static void krping_fr_test(struct krping_cb *cb)
 			fr.key = mr->rkey;
 			inv.ex.invalidate_rkey = mr->rkey;
 
-			size = prandom_u32() % cb->size;
+			size = get_random_u32() % cb->size;
 			if (size == 0)
 				size = cb->size;
 			sg_dma_len(&sg) = size;
@@ -1968,7 +1975,7 @@ err1:
 	krping_free_qp(cb);
 }
 
-int krping_doit(char *cmd)
+static int krping_doit(char *cmd)
 {
 	struct krping_cb *cb;
 	int op;
@@ -2222,13 +2229,13 @@ static int krping_read_open(struct inode *inode, struct file *file)
         return single_open(file, krping_read_proc, inode->i_private);
 }
 
-static struct file_operations krping_ops = {
-	.owner = THIS_MODULE,
-	.open = krping_read_open,
-	.read = seq_read,
-	.llseek  = seq_lseek,
-	.release = single_release,
-	.write = krping_write_proc,
+static const struct proc_ops krping_ops = {
+	// .owner = THIS_MODULE,
+	.proc_open = krping_read_open,
+	.proc_read = seq_read,
+	.proc_write = krping_write_proc,
+	.proc_lseek  = seq_lseek,
+	.proc_release = single_release,
 };
 
 static int __init krping_init(void)
