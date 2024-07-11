@@ -713,6 +713,7 @@ static u32 krping_rdma_rkey(struct krping_cb *cb, u64 buf, int post_inv)
 	const struct ib_send_wr *bad_wr;
 	int ret;
 	struct scatterlist sg = {0};
+	sg_init_marker(&sg, 1);
 
 	cb->invalidate_wr.ex.invalidate_rkey = cb->reg_mr->rkey;
 
